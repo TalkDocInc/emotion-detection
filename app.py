@@ -205,9 +205,8 @@ def analyze_video_emotions(video_path, result_id):
             
             # Process the frame with DeepFace for facial emotion
             try:
-                frame_small = cv2.resize(frame, (0,0), fx=0.5, fy=0.5) # Resize for faster processing
                 emotion_analysis = DeepFace.analyze(
-                    frame_small, 
+                    frame, 
                     actions=['emotion'],
                     enforce_detection=False,
                     silent=False                )
