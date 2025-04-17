@@ -4,7 +4,7 @@ import numpy as np
 import uuid
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
-from moviepy import VideoFileClip # Use editor for easier access
+from moviepy import VideoFileClip
 from deepface import DeepFace
 import time
 import json
@@ -20,25 +20,10 @@ import tempfile
 import torch
 from transformers import AutoProcessor, AutoModelForAudioClassification
 
-# Add at the top of your file
-# import resource # Removed as it's not available on Windows
-
-# Set memory limit to 16GB (16 * 1024 * 1024 * 1024 bytes)
-# def set_memory_limit(limit_gb=16):
-#     # Convert GB to bytes
-#     limit_bytes = limit_gb * 1024 * 1024 * 1024
-#     try:
-#         # resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes)) # Ineffective on Windows
-#         print(f"Memory limit set to {limit_gb}GB")
-#     except (ValueError, NameError, AttributeError) as e: # Catch potential errors if resource doesn't exist
-#         print(f"Could not set memory limit (resource module likely unavailable on this OS): {e}")
-
-# Call before loading models
-# set_memory_limit(16)  # Removed call
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['ALLOWED_EXTENSIONS'] = {'mp4', 'avi', 'mov', 'wmv', 'mkv'}
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max upload size
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB max upload size
 app.config['CLEANUP_INTERVAL'] = 24  # hours - files older than this will be removed
 
 # Create the uploads folder if it doesn't exist

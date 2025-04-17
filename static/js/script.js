@@ -323,11 +323,27 @@ document.addEventListener('DOMContentLoaded', function() {
             <div class="row mb-4">
                 <div class="col-md-6">
                     <h5 class="text-center">Face Emotion Distribution</h5>
-                    <canvas id="face-emotion-chart"></canvas>
+                    <div class="d-flex justify-content-center mb-2">
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button type="button" class="btn btn-outline-primary active" data-chart-type="bar" data-chart-target="face">Bar</button>
+                            <button type="button" class="btn btn-outline-primary" data-chart-type="pie" data-chart-target="face">Pie</button>
+                        </div>
+                    </div>
+                    <div style="height: 300px;">
+                        <canvas id="face-emotion-chart"></canvas>
+                    </div>
                 </div>
                 <div class="col-md-6">
                     <h5 class="text-center">Voice Emotion Distribution</h5>
-                    <canvas id="voice-emotion-chart"></canvas>
+                    <div class="d-flex justify-content-center mb-2">
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button type="button" class="btn btn-outline-primary active" data-chart-type="bar" data-chart-target="voice">Bar</button>
+                            <button type="button" class="btn btn-outline-primary" data-chart-type="pie" data-chart-target="voice">Pie</button>
+                        </div>
+                    </div>
+                    <div style="height: 300px;">
+                        <canvas id="voice-emotion-chart"></canvas>
+                    </div>
                 </div>
             </div>
         `;
@@ -345,80 +361,105 @@ document.addEventListener('DOMContentLoaded', function() {
             'no audio detected': '#17a2b8'  // cyan
         };
         
-        // Create face emotion chart
-        const faceCtx = document.getElementById('face-emotion-chart').getContext('2d');
+        // Store chart instances for later reference
+        let faceChart = null;
+        let voiceChart = null;
+
+        // Filter out emotions with zero counts
         const faceLabels = Object.keys(faceEmotionCounts).filter(emotion => faceEmotionCounts[emotion] > 0);
         const faceData = faceLabels.map(emotion => faceEmotionCounts[emotion]);
         const faceColors = faceLabels.map(emotion => colors[emotion] || '#17a2b8');
         
-        new Chart(faceCtx, {
-            type: 'bar',
-            data: {
-                labels: faceLabels,
-                datasets: [{
-                    label: 'Seconds',
-                    data: faceData,
-                    backgroundColor: faceColors,
-                    borderColor: faceColors,
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: {
-                            display: true,
-                            text: 'Seconds'
-                        }
-                    }
-                },
-                plugins: {
-                    legend: {
-                        display: false
-                    }
-                }
-            }
-        });
-        
-        // Create voice emotion chart
-        const voiceCtx = document.getElementById('voice-emotion-chart').getContext('2d');
         const voiceLabels = Object.keys(voiceEmotionCounts).filter(emotion => voiceEmotionCounts[emotion] > 0);
         const voiceData = voiceLabels.map(emotion => voiceEmotionCounts[emotion]);
         const voiceColors = voiceLabels.map(emotion => colors[emotion] || '#17a2b8');
-        
-        new Chart(voiceCtx, {
-            type: 'bar',
-            data: {
-                labels: voiceLabels,
-                datasets: [{
-                    label: 'Seconds',
-                    data: voiceData,
-                    backgroundColor: voiceColors,
-                    borderColor: voiceColors,
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: {
-                            display: true,
-                            text: 'Seconds'
-                        }
-                    }
+
+        // Create face emotion chart
+        const faceCtx = document.getElementById('face-emotion-chart').getContext('2d');
+        faceChart = createChart(faceCtx, 'bar', faceLabels, faceData, faceColors, 'Face Emotions');
+
+        // Create voice emotion chart
+        const voiceCtx = document.getElementById('voice-emotion-chart').getContext('2d');
+        voiceChart = createChart(voiceCtx, 'bar', voiceLabels, voiceData, voiceColors, 'Voice Emotions');
+
+        // Add event listeners for chart type switchers
+        document.querySelectorAll('[data-chart-type]').forEach(button => {
+            button.addEventListener('click', function() {
+                const chartType = this.getAttribute('data-chart-type');
+                const target = this.getAttribute('data-chart-target');
+                
+                // Update active button state
+                this.parentNode.querySelectorAll('.btn').forEach(btn => btn.classList.remove('active'));
+                this.classList.add('active');
+                
+                // Update chart
+                if (target === 'face') {
+                    faceChart.destroy();
+                    faceChart = createChart(faceCtx, chartType, faceLabels, faceData, faceColors, 'Face Emotions');
+                } else {
+                    voiceChart.destroy();
+                    voiceChart = createChart(voiceCtx, chartType, voiceLabels, voiceData, voiceColors, 'Voice Emotions');
+                }
+            });
+        });
+    }
+
+    // Helper function to create charts
+    function createChart(ctx, type, labels, data, colors, title) {
+        const options = {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: type === 'pie',
+                    position: 'bottom'
                 },
-                plugins: {
-                    legend: {
-                        display: false
+                title: {
+                    display: true,
+                    text: title
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const label = context.label || '';
+                            const value = context.raw || 0;
+                            const total = context.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+                            const percentage = ((value / total) * 100).toFixed(1);
+                            return type === 'pie' 
+                                ? `${label}: ${value} seconds (${percentage}%)` 
+                                : `${value} seconds (${percentage}%)`;
+                        }
                     }
                 }
             }
+        };
+
+        // Add specific options based on chart type
+        if (type === 'bar') {
+            options.scales = {
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Seconds'
+                    }
+                }
+            };
+        }
+
+        return new Chart(ctx, {
+            type: type,
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Seconds',
+                    data: data,
+                    backgroundColor: colors,
+                    borderColor: type === 'pie' ? 'white' : colors,
+                    borderWidth: type === 'pie' ? 2 : 1
+                }]
+            },
+            options: options
         });
     }
     
