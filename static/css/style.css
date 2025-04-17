@@ -1,0 +1,46 @@
+body {
+    background-color: #f8f9fa;
+}
+
+.card {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    margin-bottom: 20px;
+}
+
+.emotion-happy {
+    color: #28a745;
+}
+
+.emotion-sad {
+    color: #6c757d;
+}
+
+.emotion-angry {
+    color: #dc3545;
+}
+
+.emotion-fear {
+    color: #6610f2;
+}
+
+.emotion-surprise {
+    color: #fd7e14;
+}
+
+.emotion-neutral {
+    color: #007bff;
+}
+
+.emotion-disgust {
+    color: #20c997;
+}
+
+#emotion-timeline {
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    padding: 10px;
+}
+
+.progress {
+    height: 25px;
+}
