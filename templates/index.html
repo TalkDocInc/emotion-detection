@@ -90,6 +90,38 @@
                             </div>
                         </div>
                         
+                        <!-- Depression Score Summary -->
+                        <div class="row mb-4">
+                            <div class="col-md-12">
+                                <div class="card border-primary">
+                                    <div class="card-header bg-primary text-white">
+                                        <h5 class="mb-0">Depression Analysis</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <h6 class="mb-3">Overall Depression Score:</h6>
+                                                <div class="d-flex align-items-center">
+                                                    <div id="depression-gauge" class="w-75 me-3">
+                                                        <div class="progress" style="height: 25px;">
+                                                            <div id="depression-score-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0</div>
+                                                        </div>
+                                                    </div>
+                                                    <div id="depression-score-value" class="fs-4">0/100</div>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <h6 class="mb-3">Interpretation:</h6>
+                                                <div id="depression-interpretation" class="alert alert-info">
+                                                    Awaiting analysis results...
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
                         <!-- Charts Container -->
                         <div id="charts-container" class="mb-4">
                             <!-- Charts will be inserted here by JavaScript -->
@@ -105,6 +137,7 @@
                                                 <th>Second</th>
                                                 <th>Face Emotion</th>
                                                 <th>Voice Emotion</th>
+                                                <th>Depression Score</th>
                                                 <th>Actions</th>
                                             </tr>
                                         </thead>

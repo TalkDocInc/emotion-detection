@@ -64,6 +64,38 @@ except Exception as e:
 
 # --- End Hugging Face Model Loading ---
 
+# --- Depression Analysis Configuration ---
+# Depression indicators in facial emotions (0-1 scale, higher means more associated with depression)
+FACE_DEPRESSION_WEIGHTS = {
+    'angry': 0.6,
+    'disgust': 0.5,
+    'fear': 0.7,
+    'happy': -0.8,  # Negative because happiness indicates less depression
+    'sad': 0.9,
+    'surprise': 0.1,
+    'neutral': 0.3,
+    'no face detected': 0.0  # No contribution if no face detected
+}
+
+# Depression indicators in voice emotions (0-1 scale)
+VOICE_DEPRESSION_WEIGHTS = {
+    'neu': 0.4,   # Neutral tone can indicate mild depression
+    'hap': -0.8,  # Happiness in voice suggests less depression
+    'ang': 0.5,   # Anger can be associated with depression
+    'sad': 0.9,   # Sadness strongly correlated with depression
+    'no audio extracted': 0.0,
+    'audio export error': 0.0,
+    'model error': 0.0,
+    'prediction error': 0.0,
+    'analysis error': 0.0,
+    'no data': 0.0
+}
+
+# Overall weighting between face and voice analysis for depression score
+FACE_WEIGHT = 0.6  # Face analysis contributes 60% to the depression score
+VOICE_WEIGHT = 0.4  # Voice analysis contributes 40% to the depression score
+# --- End Depression Analysis Configuration ---
+
 # Preload/reuse DeepFace emotion model
 emotion_model = DeepFace.build_model('VGG-Face')
 
@@ -75,7 +107,52 @@ class EmotionEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
-
+def calculate_depression_score(face_emotions, voice_emotions):
+    """
+    Calculate a depression score based on face and voice emotion analysis.
+    
+    Args:
+        face_emotions: Dict of facial emotion scores or dominant emotion string
+        voice_emotions: Dict of voice emotion scores or dominant emotion string
+    
+    Returns:
+        A score between 0-100 where higher numbers indicate higher likelihood of depression
+    """
+    face_score = 0.0
+    voice_score = 0.0
+    
+    # Calculate face depression contribution
+    if isinstance(face_emotions, dict) and face_emotions:
+        # If we have detailed emotion scores
+        for emotion, score in face_emotions.items():
+            if emotion in FACE_DEPRESSION_WEIGHTS:
+                face_score += score * FACE_DEPRESSION_WEIGHTS[emotion]
+    elif isinstance(face_emotions, str):
+        # If we just have a dominant emotion string
+        if face_emotions in FACE_DEPRESSION_WEIGHTS:
+            face_score = FACE_DEPRESSION_WEIGHTS[face_emotions]
+    
+    # Calculate voice depression contribution
+    if isinstance(voice_emotions, dict) and voice_emotions:
+        # If we have detailed emotion scores
+        for emotion, score in voice_emotions.items():
+            if emotion in VOICE_DEPRESSION_WEIGHTS:
+                voice_score += score * VOICE_DEPRESSION_WEIGHTS[emotion]
+    elif isinstance(voice_emotions, str):
+        # If we just have a dominant emotion string
+        if voice_emotions in VOICE_DEPRESSION_WEIGHTS:
+            voice_score = VOICE_DEPRESSION_WEIGHTS[voice_emotions]
+    
+    # Combine scores with appropriate weighting
+    combined_score = (face_score * FACE_WEIGHT) + (voice_score * VOICE_WEIGHT)
+    
+    # Scale to 0-100 range (assuming original scores are roughly -1 to 1)
+    scaled_score = (combined_score + 1) * 50
+    
+    # Ensure score is within 0-100 bounds
+    final_score = max(0, min(100, scaled_score))
+    
+    return final_score
 
 # Start the cleanup thread
 def cleanup_old_files():
@@ -291,10 +368,14 @@ def analyze_video_emotions(video_path, result_id):
             json.dump({
                 "status": "processing",
                 "progress": 95,
-                "message": "Combining results...",
+                "message": "Combining results and calculating depression scores...",
                 "total_seconds": int(duration),
                 "results": []
             }, f, cls=EmotionEncoder)
+            
+        # Calculate overall depression score
+        total_depression_score = 0
+        depression_scores_by_second = []
             
         for i in range(int(duration)):
             face_data = next((item for item in face_results if item['second'] == i), 
@@ -302,6 +383,18 @@ def analyze_video_emotions(video_path, result_id):
             
             voice_data = next((item for item in voice_results if item['second'] == i),
                             {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
+            
+            # Calculate depression score for this second
+            depression_score = calculate_depression_score(
+                face_data['emotions'] if face_data['emotions'] else face_data['dominant_emotion'],
+                voice_data['emotions'] if voice_data['emotions'] else voice_data['dominant_emotion']
+            )
+            
+            # Store the depression score for this second
+            depression_scores_by_second.append(depression_score)
+            
+            # Add to the running total for the overall score
+            total_depression_score += depression_score
             
             combined_results.append({
                 'second': i,
@@ -312,8 +405,12 @@ def analyze_video_emotions(video_path, result_id):
                 'voice_emotion': {
                     'dominant_emotion': voice_data['dominant_emotion'],
                     'emotions': voice_data['emotions']
-                }
+                },
+                'depression_score': depression_score
             })
+        
+        # Calculate overall depression score (average of all seconds)
+        overall_depression_score = total_depression_score / len(combined_results) if combined_results else 0
         
         # Save final results
         with open(temp_result_path, 'w') as f:
@@ -321,6 +418,7 @@ def analyze_video_emotions(video_path, result_id):
                 "status": "completed",
                 "progress": 100,
                 "total_seconds": int(duration),
+                "overall_depression_score": overall_depression_score,
                 "results": combined_results
             }, f, cls=EmotionEncoder)
         

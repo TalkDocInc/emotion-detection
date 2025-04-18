@@ -128,6 +128,39 @@ document.addEventListener('DOMContentLoaded', function() {
         // Store emotion data for timeline sync
         emotionData = data.results;
         
+        // Display overall depression score if available
+        if (data.overall_depression_score !== undefined) {
+            const score = Math.round(data.overall_depression_score);
+            const scoreBar = document.getElementById('depression-score-bar');
+            const scoreValue = document.getElementById('depression-score-value');
+            const interpretation = document.getElementById('depression-interpretation');
+            
+            // Update depression score gauge
+            scoreBar.style.width = `${score}%`;
+            scoreBar.setAttribute('aria-valuenow', score);
+            scoreBar.textContent = score;
+            scoreValue.textContent = `${score}/100`;
+            
+            // Set appropriate color based on score
+            scoreBar.classList.remove('bg-success', 'bg-warning', 'bg-danger');
+            if (score < 30) {
+                scoreBar.classList.add('bg-success');
+                interpretation.classList.remove('alert-info', 'alert-warning', 'alert-danger');
+                interpretation.classList.add('alert-success');
+                interpretation.textContent = 'Low likelihood of depression detected. The subject appears to display predominantly positive or neutral emotional states.';
+            } else if (score < 60) {
+                scoreBar.classList.add('bg-warning');
+                interpretation.classList.remove('alert-info', 'alert-success', 'alert-danger');
+                interpretation.classList.add('alert-warning');
+                interpretation.textContent = 'Moderate indicators of depression detected. The subject displays mixed emotional states, with some concerning patterns.';
+            } else {
+                scoreBar.classList.add('bg-danger');
+                interpretation.classList.remove('alert-info', 'alert-success', 'alert-warning');
+                interpretation.classList.add('alert-danger');
+                interpretation.textContent = 'High indicators of depression detected. The subject displays emotional patterns strongly associated with depression.';
+            }
+        }
+        
         // Prepare data for chart
         const faceEmotionCounts = {
             'angry': 0, 'disgust': 0, 'fear': 0, 'happy': 0, 'sad': 0, 
@@ -145,6 +178,7 @@ document.addEventListener('DOMContentLoaded', function() {
             <th>Second</th>
             <th>Face Emotion</th>
             <th>Voice Emotion</th>
+            <th>Depression Score</th>
             <th>Actions</th>
         `;
         emotionResults.appendChild(headerRow);
@@ -153,6 +187,20 @@ document.addEventListener('DOMContentLoaded', function() {
         data.results.forEach(result => {
             const faceEmotion = result.face_emotion.dominant_emotion;
             const voiceEmotion = result.voice_emotion.dominant_emotion;
+            const depressionScore = result.depression_score !== undefined ? 
+                Math.round(result.depression_score) : 'N/A';
+            
+            // Determine depression score class for styling
+            let depressionScoreClass = '';
+            if (depressionScore !== 'N/A') {
+                if (depressionScore < 30) {
+                    depressionScoreClass = 'text-success';
+                } else if (depressionScore < 60) {
+                    depressionScoreClass = 'text-warning';
+                } else {
+                    depressionScoreClass = 'text-danger';
+                }
+            }
             
             const row = document.createElement('tr');
             row.id = `second-${result.second}`;
@@ -160,6 +208,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <td>${result.second}</td>
                 <td class="emotion-${faceEmotion}">${faceEmotion}</td>
                 <td class="emotion-${voiceEmotion}">${voiceEmotion}</td>
+                <td class="${depressionScoreClass}">${depressionScore}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" 
                             data-bs-target="#details-${result.second}" aria-expanded="false">
@@ -174,6 +223,10 @@ document.addEventListener('DOMContentLoaded', function() {
                             ${getEmotionDetailsHTML(result.face_emotion.emotions)}
                             <h6 class="mt-3">Voice Emotions:</h6>
                             ${getEmotionDetailsHTML(result.voice_emotion.emotions)}
+                            ${result.depression_score !== undefined ? `
+                            <h6 class="mt-3">Depression Analysis:</h6>
+                            <p>Score for this moment: <strong class="${depressionScoreClass}">${depressionScore}/100</strong></p>
+                            ` : ''}
                         </div>
                     </div>
                 </td>
@@ -321,6 +374,14 @@ document.addEventListener('DOMContentLoaded', function() {
         // Clear previous charts
         document.getElementById('charts-container').innerHTML = `
             <div class="row mb-4">
+                <div class="col-md-12">
+                    <h5 class="text-center">Depression Score Over Time</h5>
+                    <div style="height: 200px;">
+                        <canvas id="depression-trend-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-4">
                 <div class="col-md-6">
                     <h5 class="text-center">Face Emotion Distribution</h5>
                     <div class="d-flex justify-content-center mb-2">
@@ -381,27 +442,76 @@ document.addEventListener('DOMContentLoaded', function() {
         // Create voice emotion chart
         const voiceCtx = document.getElementById('voice-emotion-chart').getContext('2d');
         voiceChart = createChart(voiceCtx, 'bar', voiceLabels, voiceData, voiceColors, 'Voice Emotions');
-
-        // Add event listeners for chart type switchers
-        document.querySelectorAll('[data-chart-type]').forEach(button => {
-            button.addEventListener('click', function() {
-                const chartType = this.getAttribute('data-chart-type');
-                const target = this.getAttribute('data-chart-target');
-                
-                // Update active button state
-                this.parentNode.querySelectorAll('.btn').forEach(btn => btn.classList.remove('active'));
-                this.classList.add('active');
-                
-                // Update chart
-                if (target === 'face') {
-                    faceChart.destroy();
-                    faceChart = createChart(faceCtx, chartType, faceLabels, faceData, faceColors, 'Face Emotions');
-                } else {
-                    voiceChart.destroy();
-                    voiceChart = createChart(voiceCtx, chartType, voiceLabels, voiceData, voiceColors, 'Voice Emotions');
+        
+        // Create depression trend chart (if depression scores are available)
+        if (emotionData && emotionData.length > 0 && emotionData[0].depression_score !== undefined) {
+            const depressionCtx = document.getElementById('depression-trend-chart').getContext('2d');
+            const depressionLabels = emotionData.map(item => `Second ${item.second}`);
+            const depressionData = emotionData.map(item => item.depression_score);
+            
+            // Create gradient for depression chart
+            const gradient = depressionCtx.createLinearGradient(0, 0, 0, 200);
+            gradient.addColorStop(0, 'rgba(220, 53, 69, 0.8)');    // Red for high
+            gradient.addColorStop(0.5, 'rgba(255, 193, 7, 0.8)');  // Yellow for mid
+            gradient.addColorStop(1, 'rgba(40, 167, 69, 0.8)');    // Green for low
+            
+            new Chart(depressionCtx, {
+                type: 'line',
+                data: {
+                    labels: depressionLabels,
+                    datasets: [{
+                        label: 'Depression Score',
+                        data: depressionData,
+                        borderColor: 'rgba(75, 192, 192, 1)',
+                        backgroundColor: gradient,
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Depression Score'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Video Timeline'
+                            },
+                            ticks: {
+                                // Display fewer x-axis labels if there are many data points
+                                maxTicksLimit: 10,
+                                callback: function(val, index) {
+                                    // Show fewer labels when we have a lot of seconds
+                                    return index % Math.ceil(depressionLabels.length / 10) === 0 ? this.getLabelForValue(val) : '';
+                                }
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `Depression: ${Math.round(context.raw)}/100`;
+                                }
+                            }
+                        }
+                    },
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    }
                 }
             });
-        });
+        }
     }
 
     // Helper function to create charts
