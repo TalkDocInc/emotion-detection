@@ -87,6 +87,11 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(data => {
                 console.log('Poll results:', data);
                 
+                // If results JSON not yet available, skip until next poll
+                if (data.status === 'not_found') {
+                    return;
+                }
+                
                 if (data.status === 'error') {
                     clearInterval(pollInterval);
                     showError(data.error || 'An error occurred during processing');

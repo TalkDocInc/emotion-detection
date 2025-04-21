@@ -19,6 +19,11 @@ from sklearn.preprocessing import StandardScaler
 import tempfile
 import torch
 from transformers import AutoProcessor, AutoModelForAudioClassification
+import logging
+import logging_config  # initialize file logging (rotating file handler)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -38,30 +43,50 @@ os.environ['TF_NUM_INTEROP_THREADS'] = '1'
 os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices=false'
 
 # --- Hugging Face Model Loading ---
-# Load the processor and model once when the app starts
-# This might take a moment the first time it downloads the model
 VOICE_MODEL_NAME = "superb/wav2vec2-base-superb-er"
-try:
-    # Use AutoFeatureExtractor instead of AutoProcessor for wav2vec2 models
-    from transformers import Wav2Vec2FeatureExtractor, AutoModel, AutoConfig
-    
-    voice_config = AutoConfig.from_pretrained(VOICE_MODEL_NAME)
-    voice_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(VOICE_MODEL_NAME)
-    voice_model = AutoModel.from_pretrained(VOICE_MODEL_NAME)
-    
-    # Define emotion labels for superb/wav2vec2-base-superb-er (IEMOCAP dataset)
-    emotion_labels = ['neu', 'hap', 'ang', 'sad']
-    voice_config.id2label = {i: label for i, label in enumerate(emotion_labels)}
-    voice_config.label2id = {label: i for i, label in enumerate(emotion_labels)}
-    
-    print(f"Successfully loaded voice model: {VOICE_MODEL_NAME}")
-except Exception as e:
-    print(f"Error loading Hugging Face model {VOICE_MODEL_NAME}: {e}")
-    # Fallback or error handling if model loading fails
-    voice_feature_extractor = None
-    voice_model = None
-    voice_config = None
+LOCAL_MODEL_DIR = os.path.join('models', 'wav2vec2-er')
+os.makedirs(LOCAL_MODEL_DIR, exist_ok=True)
 
+# Define a function to load the model with retries
+def load_voice_model(model_name, local_dir, max_retries=3):
+    """Load the voice emotion model with retries and local caching"""
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Loading voice model (attempt {attempt+1}/{max_retries})...")
+            
+            # Try loading from local directory first if it exists
+            if os.path.exists(os.path.join(local_dir, "config.json")):
+                logger.info(f"Found local model at {local_dir}, loading...")
+                processor = AutoProcessor.from_pretrained(local_dir)
+                model = AutoModelForAudioClassification.from_pretrained(local_dir)
+                logger.info("Successfully loaded voice model from local cache")
+                return processor, model
+                
+            # Otherwise, download from Hugging Face and cache locally
+            processor = AutoProcessor.from_pretrained(model_name)
+            model = AutoModelForAudioClassification.from_pretrained(model_name)
+            
+            # Save the model and processor locally for future offline use
+            logger.info(f"Saving model to {local_dir} for future offline use")
+            processor.save_pretrained(local_dir)
+            model.save_pretrained(local_dir)
+            
+            logger.info(f"Successfully loaded audio classification model: {model_name}")
+            return processor, model
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, etc.
+                logger.warning(f"Attempt {attempt+1}/{max_retries} failed: {str(e)}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                logger.exception(f"All {max_retries} attempts to load voice model failed")
+                return None, None
+
+# Load the model using our new function
+voice_processor, voice_model = load_voice_model(VOICE_MODEL_NAME, LOCAL_MODEL_DIR)
+# Get emotion labels if model loaded successfully
+emotion_labels = list(voice_model.config.id2label.values()) if voice_model is not None else []
 # --- End Hugging Face Model Loading ---
 
 # --- Depression Analysis Configuration ---
@@ -73,13 +98,13 @@ FACE_DEPRESSION_WEIGHTS = {
     'happy': -0.8,  # Negative because happiness indicates less depression
     'sad': 0.9,
     'surprise': 0.0,
-    'neutral': 0.3,
+    'neutral': 0.0,
     'no face detected': 0.0  # No contribution if no face detected
 }
 
 # Depression indicators in voice emotions (0-1 scale)
 VOICE_DEPRESSION_WEIGHTS = {
-    'neu': 0.3,   # Neutral tone can indicate mild depression
+    'neu': 0.0,  
     'hap': -0.8,  # Happiness in voice suggests less depression
     'ang': 0.5,   # Anger can be associated with depression
     'sad': 0.9,   # Sadness strongly correlated with depression
@@ -95,9 +120,6 @@ VOICE_DEPRESSION_WEIGHTS = {
 FACE_WEIGHT = 0.6  # Face analysis contributes 60% to the depression score
 VOICE_WEIGHT = 0.4  # Voice analysis contributes 40% to the depression score
 # --- End Depression Analysis Configuration ---
-
-# Preload/reuse DeepFace emotion model
-emotion_model = DeepFace.build_model('VGG-Face')
 
 class EmotionEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -154,6 +176,16 @@ def calculate_depression_score(face_emotions, voice_emotions):
     
     return final_score
 
+# Lock and helper for atomic progress file writes
+dump_lock = threading.Lock()
+def write_progress(result_path, payload):
+    """Atomically write JSON payload to result file with lock"""
+    temp_path = f"{result_path}.tmp"
+    with dump_lock:
+        with open(temp_path, 'w') as f:
+            json.dump(payload, f, cls=EmotionEncoder)
+        os.replace(temp_path, result_path)
+
 # Start the cleanup thread
 def cleanup_old_files():
     """
@@ -182,10 +214,10 @@ def cleanup_old_files():
                     elif os.path.isdir(file_path):
                         shutil.rmtree(file_path)
                         
-            print(f"Cleanup completed at {now}")
+            logger.info(f"Cleanup completed at {now}")
                 
-        except Exception as e:
-            print(f"Error during cleanup: {e}")
+        except Exception:
+            logger.exception("Error during cleanup")
 
 # Start the cleanup thread when the app starts
 cleanup_thread = threading.Thread(target=cleanup_old_files)
@@ -199,23 +231,23 @@ def allowed_file(filename):
 @app.route('/')
 def index():
     try:
-        print("Rendering index page")
+        logger.info("Rendering index page")
         return render_template('index.html')
     except Exception as e:
-        print(f"Error rendering index: {e}")
+        logger.error(f"Error rendering index: {e}")
         return f"Error: {str(e)}", 500
     
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'video' not in request.files:
-        print("No video file part in request")
+        logger.warning("No video file part in request")
         return jsonify({'error': 'No video file part'}), 400
     
     file = request.files['video']
     
     if file.filename == '':
-        print("No selected file")
+        logger.warning("No selected file")
         return jsonify({'error': 'No selected file'}), 400
     
     if file and allowed_file(file.filename):
@@ -224,10 +256,10 @@ def upload_file():
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         file.save(file_path)
 
-        # Process the video and analyze emotions
+        # Process the video and analyze emotions asynchronously
         result_id = str(uuid.uuid4())
-        
-        analyze_video_emotions(file_path, result_id)
+        # Start background thread for analysis so request returns immediately
+        threading.Thread(target=analyze_video_emotions, args=(file_path, result_id), daemon=True).start()
         return jsonify({
             'message': 'Video uploaded successfully',
             'filename': unique_filename,
@@ -246,7 +278,7 @@ def analyze_video_emotions(video_path, result_id):
     
     try:
         # Check if voice model is loaded
-        if voice_feature_extractor is None or voice_model is None:
+        if voice_processor is None or voice_model is None:
             raise ValueError("Voice emotion model failed to load. Cannot proceed with voice analysis.")
 
         # Open the video file
@@ -259,26 +291,24 @@ def analyze_video_emotions(video_path, result_id):
         audio_path = extract_audio_from_video(video_path)
         
         # Save initial progress
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "processing",
-                "progress": 0,
-                "message": "Starting analysis...",
-                "total_seconds": int(duration),
-                "results": []
-            }, f, cls=EmotionEncoder)
+        write_progress(temp_result_path, {
+            "status": "processing",
+            "progress": 0,
+            "message": "Starting analysis...",
+            "total_seconds": int(duration),
+            "results": []
+        })
         
-        # Process video frames at 1-second intervals
-        frame_interval = int(fps) if fps > 0 else 1
-        current_frame = 0
-        second = 0
-        
-        # Face analysis loop
-        while current_frame < total_frames:
-            video.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+        # Process video frames at 1-second intervals with accurate time mapping
+        num_seconds = int(duration)
+        for second in range(num_seconds):
+            frame_index = round(second * fps)
+            if frame_index >= total_frames:
+                break
+            video.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ret, frame = video.read()
             if not ret:
-                break
+                continue
             
             # Process the frame with DeepFace for facial emotion
             try:
@@ -304,42 +334,36 @@ def analyze_video_emotions(video_path, result_id):
                     'emotions': emotion_scores
                 })
                 
-            except Exception as e:
+            except Exception:
                 # If face detection fails, log "no face detected"
                 face_results.append({
                     'second': second,
                     'dominant_emotion': 'no face detected',
                     'emotions': {}
                 })
-                print(f"Error processing face in frame {current_frame}: {e}") # Keep this less verbose
+                logger.warning(f"Error processing face in frame {frame_index}", exc_info=True)
             
             # Update progress - Face analysis part (0% to 50%)
             progress = int((second / duration * 50) if duration > 0 else 0)
-            with open(temp_result_path, 'w') as f:
-                json.dump({
-                    "status": "processing",
-                    "progress": progress,
-                    "message": f"Analyzing facial emotions... ({second+1}/{int(duration)}s)",
-                    "total_seconds": int(duration),
-                    "results": [] # Keep results empty during processing
-                }, f, cls=EmotionEncoder)
-            
-            # Move to next second
-            second += 1
-            current_frame += frame_interval
+            write_progress(temp_result_path, {
+                "status": "processing",
+                "progress": progress,
+                "message": f"Analyzing facial emotions... ({second+1}/{int(duration)}s)",
+                "total_seconds": int(duration),
+                "results": [] # Keep results empty during processing
+            })
         
         video.release() # Release video capture early
 
         # Voice analysis part
         if audio_path:
-            with open(temp_result_path, 'w') as f:
-                 json.dump({
-                    "status": "processing",
-                    "progress": 50, # Mark start of voice analysis
-                    "message": "Analyzing voice emotions...",
-                    "total_seconds": int(duration),
-                    "results": []
-                }, f, cls=EmotionEncoder)
+            write_progress(temp_result_path, {
+                "status": "processing",
+                "progress": 50, # Mark start of voice analysis
+                "message": "Analyzing voice emotions...",
+                "total_seconds": int(duration),
+                "results": []
+            })
 
             # Process voice emotion analysis using the new function
             # Pass result_id for progress updates within analyze_audio_by_second_hf
@@ -350,28 +374,26 @@ def analyze_video_emotions(video_path, result_id):
                 try:
                     os.remove(audio_path)
                 except OSError as remove_err:
-                    print(f"Error removing temporary audio file {audio_path}: {remove_err}")
+                    logger.warning(f"Error removing temporary audio file {audio_path}: {remove_err}")
         else:
              # If audio extraction failed, create placeholder voice results
              voice_results = [{'second': s, 'dominant_emotion': 'no audio extracted', 'emotions': {}} for s in range(int(duration))]
-             with open(temp_result_path, 'w') as f:
-                 json.dump({
-                    "status": "processing",
-                    "progress": 90, # Skip voice analysis progress
-                    "message": "Skipping voice analysis (no audio extracted)...",
-                    "total_seconds": int(duration),
-                    "results": []
-                }, f, cls=EmotionEncoder)
-
-        # Combine face and voice results
-        with open(temp_result_path, 'w') as f:
-            json.dump({
+             write_progress(temp_result_path, {
                 "status": "processing",
-                "progress": 95,
-                "message": "Combining results and calculating depression scores...",
+                "progress": 90, # Skip voice analysis progress
+                "message": "Skipping voice analysis (no audio extracted)...",
                 "total_seconds": int(duration),
                 "results": []
-            }, f, cls=EmotionEncoder)
+            })
+
+        # Combine face and voice results
+        write_progress(temp_result_path, {
+            "status": "processing",
+            "progress": 95,
+            "message": "Combining results and calculating depression scores...",
+            "total_seconds": int(duration),
+            "results": []
+        })
             
         # Calculate overall depression score
         total_depression_score = 0
@@ -413,24 +435,22 @@ def analyze_video_emotions(video_path, result_id):
         overall_depression_score = total_depression_score / len(combined_results) if combined_results else 0
         
         # Save final results
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "completed",
-                "progress": 100,
-                "total_seconds": int(duration),
-                "overall_depression_score": overall_depression_score,
-                "results": combined_results
-            }, f, cls=EmotionEncoder)
+        write_progress(temp_result_path, {
+            "status": "completed",
+            "progress": 100,
+            "total_seconds": int(duration),
+            "overall_depression_score": overall_depression_score,
+            "results": combined_results
+        })
         
     except Exception as e:
-        print(f"Error in analyze_video_emotions: {e}")
+        logger.exception("Error in analyze_video_emotions")
         # Save error status
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "error",
-                "error": str(e),
-                "results": combined_results # Include any partial results
-            }, f, cls=EmotionEncoder)
+        write_progress(temp_result_path, {
+            "status": "error",
+            "error": str(e),
+            "results": combined_results # Include any partial results
+        })
     finally:
         # Ensure video capture is released if an error occurred before release
         if 'video' in locals() and video.isOpened():
@@ -450,44 +470,24 @@ def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path
     try:
         # Load full audio using pydub for easy slicing
         audio = AudioSegment.from_file(audio_path)
-        target_sr = voice_feature_extractor.sampling_rate
+        target_sr = voice_processor.sampling_rate
         
-        # Process audio in 1-second chunks
+        # Process audio in 1-second chunks in-memory (no temp files)
         for second in range(int(duration)):
             # Extract 1-second segment
             start_ms = second * 1000
             end_ms = (second + 1) * 1000
-            
             if end_ms > len(audio):
                 break
-                
             segment = audio[start_ms:end_ms]
-            
-            # Save segment to temporary file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_path = temp_file.name
-                try:
-                    # Export segment: mono, target sample rate
-                    segment.set_channels(1).set_frame_rate(target_sr).export(temp_path, format='wav')
-                except Exception as export_err:
-                    print(f"Error exporting audio segment for second {second}: {export_err}")
-                    if os.path.exists(temp_path): os.unlink(temp_path)
-                    voice_results.append({
-                        'second': second,
-                        'dominant_emotion': 'audio export error',
-                        'emotions': {}
-                    })
-                    continue
-            
-            # Predict emotion using the Hugging Face model
-            emotion_result = predict_voice_emotion_hf(temp_path)
-            
-            # Delete temporary file
-            try:
-                if os.path.exists(temp_path): os.unlink(temp_path)
-            except OSError as unlink_err:
-                 print(f"Error deleting temp audio file {temp_path}: {unlink_err}")
-            
+            # Convert to mono and target sample rate
+            segment = segment.set_channels(1).set_frame_rate(target_sr)
+            # Convert to numpy array and normalize
+            samples = np.array(segment.get_array_of_samples(), dtype=np.float32)
+            max_val = float(2 ** (8 * segment.sample_width - 1))
+            speech = samples / max_val
+            # Predict emotion using the Hugging Face model on raw audio
+            emotion_result = predict_voice_emotion_hf(speech=speech, sr=target_sr)
             # Add to results with timestamp
             voice_results.append({
                 'second': second,
@@ -497,19 +497,18 @@ def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path
             
             # Update progress (Voice analysis part: 50% to 90%)
             progress = 50 + int(((second + 1) / duration * 40) if duration > 0 else 0)
-            with open(temp_result_path, 'w') as f:
-                 json.dump({
-                    "status": "processing",
-                    "progress": progress,
-                    "message": f"Analyzing voice emotions... ({second+1}/{int(duration)}s)",
-                    "total_seconds": int(duration),
-                    "results": [] # Keep results empty during processing
-                }, f, cls=EmotionEncoder)
+            write_progress(temp_result_path, {
+                "status": "processing",
+                "progress": progress,
+                "message": f"Analyzing voice emotions... ({second+1}/{int(duration)}s)",
+                "total_seconds": int(duration),
+                "results": [] # Keep results empty during processing
+            })
 
         return voice_results
     
-    except Exception as e:
-        print(f"Error analyzing audio by second (HF): {e}")
+    except Exception:
+        logger.exception("Error analyzing audio by second (HF)")
         if not voice_results:
              return [{'second': s, 'dominant_emotion': 'analysis error', 'emotions': {}} for s in range(int(duration))]
         return voice_results
@@ -520,7 +519,7 @@ def get_results(result_id):
     result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{result_id}.json")
     
     if not os.path.exists(result_path):
-        return jsonify({"status": "not_found"}), 404
+        return jsonify({"status": "not_found"}), 200
     
     with open(result_path, 'r') as f:
         results = json.load(f)
@@ -543,72 +542,53 @@ def extract_audio_from_video(video_path, output_dir=None):
         audio_name = f"{os.path.splitext(base_name)[0]}_audio.wav"
         audio_path = os.path.join(output_dir, audio_name)
         
-        # Extract audio using moviepy
-        video = VideoFileClip(video_path)
-        video.audio.write_audiofile(audio_path, codec='pcm_s16le')
-        
+        # Extract audio using moviepy with context manager for automatic close
+        with VideoFileClip(video_path) as video:
+            video.audio.write_audiofile(audio_path, codec='pcm_s16le')
         return audio_path
-    
-    except Exception as e:
-        print(f"Error extracting audio from video: {e}")
+    except Exception:
+        logger.exception("Error extracting audio from video")
         return None
 
-def predict_voice_emotion_hf(audio_segment_path):
-    """Predict emotion from a 1-second audio segment using Hugging Face wav2vec2 model."""
-    if voice_feature_extractor is None or voice_model is None:
-        print("Voice model not loaded. Returning unknown.")
+def predict_voice_emotion_hf(audio_segment_path=None, speech=None, sr=None):
+    """Predict emotion from a 1-second audio segment using Hugging Face wav2vec2 model.
+    Can accept raw audio array (`speech` and `sr`) or a filesystem path."""
+    if voice_processor is None or voice_model is None:
+        logger.warning("Voice model not loaded. Returning unknown.")
         return {
             'dominant_emotion': 'model error',
             'emotions': {}
         }
-
     try:
-        # Load the audio segment with correct sampling rate
-        target_sr = voice_feature_extractor.sampling_rate
-        speech, sr = librosa.load(audio_segment_path, sr=target_sr)
-
-        # Preprocess the audio
-        inputs = voice_feature_extractor(speech, sampling_rate=target_sr, return_tensors="pt", padding=True)
-
-        # Make prediction with raw model
+        # Load or use provided raw audio
+        if speech is None:
+            speech, sr = librosa.load(audio_segment_path, sr=voice_processor.sampling_rate)
+        # Preprocess with classifier processor
+        inputs = voice_processor(speech, sampling_rate=sr, return_tensors="pt", padding=True)
         with torch.no_grad():
             outputs = voice_model(**inputs)
-            # For wav2vec2-base-superb-er, we need to process the output for emotion recognition
-            # The model returns hidden states that we can use for emotion classification
-            pooled_output = torch.mean(outputs.last_hidden_state, dim=1)
-            
-            # For IEMOCAP dataset used in superb/wav2vec2-base-superb-er, we have 4 emotion classes
-            # We'll use a simple linear classifier
-            # Note: In a real application, you might need to load a classifier head trained on these features
-            # Here we're doing a simple approximation
-            emotion_scores = torch.softmax(pooled_output[:, :4], dim=1).squeeze().tolist()
-            
-            # Get the predicted class
-            predicted_class_id = torch.argmax(torch.softmax(pooled_output[:, :4], dim=1), dim=1).item()
-            dominant_emotion = voice_config.id2label[predicted_class_id]
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=1).squeeze()
+            # Ensure list format
+            probs = probs.tolist() if hasattr(probs, 'tolist') else [float(probs)]
+            predicted_id = int(torch.argmax(logits, dim=1).item())
+            dominant_emotion = voice_model.config.id2label[predicted_id]
+        # Map probabilities to labels
+        emotion_scores_dict = {label: probs[idx] for idx, label in voice_model.config.id2label.items()}
 
-        # Create emotion score dictionary
-        emotion_scores_dict = {}
-        for i in range(len(emotion_labels)):
-            emotion_scores_dict[emotion_labels[i]] = emotion_scores[i] if i < len(emotion_scores) else 0.0
-
-        return {
-            'dominant_emotion': dominant_emotion,
-            'emotions': emotion_scores_dict
-        }
-
-    except Exception as e:
-        print(f"Error predicting voice emotion with HF model: {e}")
+        return {'dominant_emotion': dominant_emotion, 'emotions': emotion_scores_dict}
+    except Exception:
+        logger.exception("Error predicting voice emotion")
         return {
             'dominant_emotion': 'prediction error',
             'emotions': {}
         }
-    
+
 @app.route('/test')
 def test():
     return "Flask server is running!"
 
 if __name__ == '__main__':
-    print("Starting Flask app...")
+    logger.info("Starting Flask app...")
     app.run(debug=True)
-    print("Flask App started")
+    logger.info("Flask App started")
