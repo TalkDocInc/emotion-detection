@@ -47,6 +47,10 @@ VOICE_MODEL_NAME = "superb/wav2vec2-base-superb-er"
 LOCAL_MODEL_DIR = os.path.join('models', 'wav2vec2-er')
 os.makedirs(LOCAL_MODEL_DIR, exist_ok=True)
 
+# Set up device handling for PyTorch
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+logger.info(f"PyTorch using device: {DEVICE}")
+
 # Define a function to load the model with retries
 def load_voice_model(model_name, local_dir, max_retries=3):
     """Load the voice emotion model with retries and local caching"""
@@ -59,12 +63,20 @@ def load_voice_model(model_name, local_dir, max_retries=3):
                 logger.info(f"Found local model at {local_dir}, loading...")
                 processor = AutoProcessor.from_pretrained(local_dir)
                 model = AutoModelForAudioClassification.from_pretrained(local_dir)
+                # Move model to appropriate device (CPU/GPU)
+                model = model.to(DEVICE)
+                # Set model to evaluation mode
+                model.eval()
                 logger.info("Successfully loaded voice model from local cache")
                 return processor, model
                 
             # Otherwise, download from Hugging Face and cache locally
             processor = AutoProcessor.from_pretrained(model_name)
             model = AutoModelForAudioClassification.from_pretrained(model_name)
+            
+            # Move model to appropriate device and set to evaluation mode
+            model = model.to(DEVICE)
+            model.eval()
             
             # Save the model and processor locally for future offline use
             logger.info(f"Saving model to {local_dir} for future offline use")
@@ -468,32 +480,81 @@ def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path
     voice_results = []
     
     try:
+        # Verify audio file exists
+        if not os.path.exists(audio_path):
+            logger.error(f"Audio file not found: {audio_path}")
+            return [{'second': s, 'dominant_emotion': 'audio file not found', 'emotions': {}} 
+                    for s in range(int(duration))]
+        
         # Load full audio using pydub for easy slicing
-        audio = AudioSegment.from_file(audio_path)
-        target_sr = voice_processor.sampling_rate
+        try:
+            audio = AudioSegment.from_file(audio_path)
+            target_sr = voice_processor.sampling_rate if voice_processor else 16000  # Fallback sampling rate
+        except Exception as e:
+            logger.exception(f"Failed to load audio file {audio_path}: {str(e)}")
+            return [{'second': s, 'dominant_emotion': 'audio loading error', 'emotions': {}} 
+                    for s in range(int(duration))]
+        
+        # Check if the audio file is valid
+        if len(audio) == 0:
+            logger.warning(f"Empty audio file: {audio_path}")
+            return [{'second': s, 'dominant_emotion': 'empty audio', 'emotions': {}} 
+                    for s in range(int(duration))]
         
         # Process audio in 1-second chunks in-memory (no temp files)
         for second in range(int(duration)):
             # Extract 1-second segment
             start_ms = second * 1000
             end_ms = (second + 1) * 1000
+            
+            # Skip if we're past the audio length
+            if start_ms >= len(audio):
+                voice_results.append({
+                    'second': second,
+                    'dominant_emotion': 'no audio data',
+                    'emotions': {}
+                })
+                continue
+                
+            # Handle the last segment that might be shorter than 1 second
             if end_ms > len(audio):
-                break
-            segment = audio[start_ms:end_ms]
-            # Convert to mono and target sample rate
-            segment = segment.set_channels(1).set_frame_rate(target_sr)
-            # Convert to numpy array and normalize
-            samples = np.array(segment.get_array_of_samples(), dtype=np.float32)
-            max_val = float(2 ** (8 * segment.sample_width - 1))
-            speech = samples / max_val
-            # Predict emotion using the Hugging Face model on raw audio
-            emotion_result = predict_voice_emotion_hf(speech=speech, sr=target_sr)
-            # Add to results with timestamp
-            voice_results.append({
-                'second': second,
-                'dominant_emotion': emotion_result['dominant_emotion'],
-                'emotions': emotion_result['emotions']
-            })
+                end_ms = len(audio)
+                
+            # Skip very short segments (less than 200ms)
+            if end_ms - start_ms < 200:
+                voice_results.append({
+                    'second': second,
+                    'dominant_emotion': 'segment too short',
+                    'emotions': {}
+                })
+                continue
+                
+            try:
+                # Extract and process the segment
+                segment = audio[start_ms:end_ms]
+                # Convert to mono and target sample rate
+                segment = segment.set_channels(1).set_frame_rate(target_sr)
+                # Convert to numpy array and normalize
+                samples = np.array(segment.get_array_of_samples(), dtype=np.float32)
+                max_val = float(2 ** (8 * segment.sample_width - 1))
+                speech = samples / max_val
+                
+                # Predict emotion using the Hugging Face model on raw audio
+                emotion_result = predict_voice_emotion_hf(speech=speech, sr=target_sr)
+                
+                # Add to results with timestamp
+                voice_results.append({
+                    'second': second,
+                    'dominant_emotion': emotion_result['dominant_emotion'],
+                    'emotions': emotion_result['emotions']
+                })
+            except Exception as e:
+                logger.warning(f"Error processing audio segment at second {second}: {str(e)}")
+                voice_results.append({
+                    'second': second,
+                    'dominant_emotion': 'segment processing error',
+                    'emotions': {}
+                })
             
             # Update progress (Voice analysis part: 50% to 90%)
             progress = 50 + int(((second + 1) / duration * 40) if duration > 0 else 0)
@@ -505,13 +566,29 @@ def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path
                 "results": [] # Keep results empty during processing
             })
 
+        # If we got here with no results, something went wrong
+        if not voice_results:
+            return [{'second': s, 'dominant_emotion': 'no analysis results', 'emotions': {}} 
+                    for s in range(int(duration))]
+                    
         return voice_results
     
-    except Exception:
-        logger.exception("Error analyzing audio by second (HF)")
+    except Exception as e:
+        logger.exception(f"Error analyzing audio by second (HF): {str(e)}")
         if not voice_results:
-             return [{'second': s, 'dominant_emotion': 'analysis error', 'emotions': {}} for s in range(int(duration))]
+             return [{'second': s, 'dominant_emotion': 'analysis error', 'emotions': {}} 
+                     for s in range(int(duration))]
         return voice_results
+    finally:
+        # Clean up any memory intensive objects
+        if 'speech' in locals():
+            del speech
+        if 'samples' in locals():
+            del samples
+        if 'segment' in locals():
+            del segment
+        if 'audio' in locals():
+            del audio
 
 @app.route('/results/<result_id>', methods=['GET'])
 def get_results(result_id):
@@ -559,24 +636,82 @@ def predict_voice_emotion_hf(audio_segment_path=None, speech=None, sr=None):
             'dominant_emotion': 'model error',
             'emotions': {}
         }
+    
     try:
+        # Input validation
+        if speech is None and audio_segment_path is None:
+            logger.error("No audio data provided")
+            return {
+                'dominant_emotion': 'no audio data',
+                'emotions': {}
+            }
+        
         # Load or use provided raw audio
         if speech is None:
-            speech, sr = librosa.load(audio_segment_path, sr=voice_processor.sampling_rate)
+            if not os.path.exists(audio_segment_path):
+                logger.error(f"Audio file not found: {audio_segment_path}")
+                return {
+                    'dominant_emotion': 'file not found',
+                    'emotions': {}
+                }
+            try:
+                speech, sr = librosa.load(audio_segment_path, sr=voice_processor.sampling_rate)
+            except Exception as e:
+                logger.error(f"Failed to load audio file: {str(e)}")
+                return {
+                    'dominant_emotion': 'audio loading error',
+                    'emotions': {}
+                }
+        
+        # Check if we have valid audio data
+        if speech.size == 0 or np.isnan(speech).any():
+            logger.warning("Invalid audio data (empty or contains NaN values)")
+            return {
+                'dominant_emotion': 'invalid audio data',
+                'emotions': {}
+            }
+        
+        # Ensure speech is the right type and on the correct device
+        speech = np.asarray(speech, dtype=np.float32)
+        
         # Preprocess with classifier processor
         inputs = voice_processor(speech, sampling_rate=sr, return_tensors="pt", padding=True)
+        
+        # Move inputs to the same device as the model
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        
+        # Set a timeout for model inference
         with torch.no_grad():
+            # Run inference with the model
             outputs = voice_model(**inputs)
             logits = outputs.logits
             probs = torch.softmax(logits, dim=1).squeeze()
-            # Ensure list format
-            probs = probs.tolist() if hasattr(probs, 'tolist') else [float(probs)]
+            
+            # Ensure list format (handles both single and batch predictions)
+            if probs.dim() == 0:  # Single value
+                probs = [float(probs)]
+            else:  # Vector
+                probs = probs.tolist() if hasattr(probs, 'tolist') else [float(p) for p in probs]
+            
+            # Get the predicted label
             predicted_id = int(torch.argmax(logits, dim=1).item())
             dominant_emotion = voice_model.config.id2label[predicted_id]
+        
         # Map probabilities to labels
-        emotion_scores_dict = {label: probs[idx] for idx, label in voice_model.config.id2label.items()}
+        emotion_scores_dict = {label: probs[idx] if idx < len(probs) else 0.0 
+                               for idx, label in voice_model.config.id2label.items()}
 
         return {'dominant_emotion': dominant_emotion, 'emotions': emotion_scores_dict}
+    
+    except torch.cuda.OutOfMemoryError:
+        logger.exception("CUDA out of memory during voice emotion prediction")
+        # Try to free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {
+            'dominant_emotion': 'gpu memory error',
+            'emotions': {}
+        }
     except Exception:
         logger.exception("Error predicting voice emotion")
         return {
