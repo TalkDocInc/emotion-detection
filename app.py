@@ -107,51 +107,87 @@ class EmotionEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
-def calculate_depression_score(face_emotions, voice_emotions):
+def calculate_depression_score(face_emotion_data, voice_emotion_data):
     """
     Calculate a depression score based on face and voice emotion analysis.
-    
+    Uses detailed emotion scores when available for higher accuracy.
+
     Args:
-        face_emotions: Dict of facial emotion scores or dominant emotion string
-        voice_emotions: Dict of voice emotion scores or dominant emotion string
-    
+        face_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
+        voice_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
+
     Returns:
         A score between 0-100 where higher numbers indicate higher likelihood of depression
     """
-    face_score = 0.0
-    voice_score = 0.0
-    
-    # Calculate face depression contribution
-    if isinstance(face_emotions, dict) and face_emotions:
-        # If we have detailed emotion scores
-        for emotion, score in face_emotions.items():
-            if emotion in FACE_DEPRESSION_WEIGHTS:
-                face_score += score * FACE_DEPRESSION_WEIGHTS[emotion]
-    elif isinstance(face_emotions, str):
-        # If we just have a dominant emotion string
-        if face_emotions in FACE_DEPRESSION_WEIGHTS:
-            face_score = FACE_DEPRESSION_WEIGHTS[face_emotions]
-    
-    # Calculate voice depression contribution
-    if isinstance(voice_emotions, dict) and voice_emotions:
-        # If we have detailed emotion scores
-        for emotion, score in voice_emotions.items():
-            if emotion in VOICE_DEPRESSION_WEIGHTS:
-                voice_score += score * VOICE_DEPRESSION_WEIGHTS[emotion]
-    elif isinstance(voice_emotions, str):
-        # If we just have a dominant emotion string
-        if voice_emotions in VOICE_DEPRESSION_WEIGHTS:
-            voice_score = VOICE_DEPRESSION_WEIGHTS[voice_emotions]
-    
-    # Combine scores with appropriate weighting
-    combined_score = (face_score * FACE_WEIGHT) + (voice_score * VOICE_WEIGHT)
-    
-    # Scale to 0-100 range (assuming original scores are roughly -1 to 1)
+    face_dep_contribution = 0.0
+    voice_dep_contribution = 0.0
+    face_weight_used = 0.0  # Flag to track if face data contributed
+    voice_weight_used = 0.0 # Flag to track if voice data contributed
+
+    # --- Calculate Face Depression Contribution ---
+    face_emotions = face_emotion_data.get('emotions', {})
+    face_dominant = face_emotion_data.get('dominant_emotion', 'no data')
+
+    if face_emotions: # Prioritize detailed scores
+        total_face_score = sum(face_emotions.values()) # Normalize scores relative to their sum
+        if total_face_score > 1e-6: # Avoid division by zero
+            for emotion, score in face_emotions.items():
+                if emotion in FACE_DEPRESSION_WEIGHTS:
+                    # Weighted contribution of this emotion, normalized by total score
+                    face_dep_contribution += (score / total_face_score) * FACE_DEPRESSION_WEIGHTS[emotion]
+            face_weight_used = 1.0 # Mark that we used face data based on detailed scores
+        # Fallback if scores are zero/empty but dominant exists and is relevant
+        elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
+             face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
+             face_weight_used = 1.0
+    # Fallback to dominant emotion string if no detailed scores
+    elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
+        face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
+        face_weight_used = 1.0 # Mark that we used face data based on dominant emotion
+
+    # --- Calculate Voice Depression Contribution ---
+    voice_emotions = voice_emotion_data.get('emotions', {})
+    voice_dominant = voice_emotion_data.get('dominant_emotion', 'no data')
+
+    if voice_emotions: # Prioritize detailed scores
+        total_voice_score = sum(voice_emotions.values()) # Normalize scores
+        if total_voice_score > 1e-6:
+            for emotion, score in voice_emotions.items():
+                if emotion in VOICE_DEPRESSION_WEIGHTS:
+                    # Weighted contribution, normalized by total score
+                    voice_dep_contribution += (score / total_voice_score) * VOICE_DEPRESSION_WEIGHTS[emotion]
+            voice_weight_used = 1.0 # Mark that we used voice data based on detailed scores
+        # Fallback if scores are zero/empty but dominant exists and is relevant
+        elif voice_dominant in VOICE_DEPRESSION_WEIGHTS and VOICE_DEPRESSION_WEIGHTS[voice_dominant] != 0.0:
+            voice_dep_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
+            voice_weight_used = 1.0
+    # Fallback to dominant emotion string if no detailed scores
+    elif voice_dominant in VOICE_DEPRESSION_WEIGHTS and VOICE_DEPRESSION_WEIGHTS[voice_dominant] != 0.0:
+        voice_dep_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
+        voice_weight_used = 1.0 # Mark that we used voice data based on dominant emotion
+
+    # --- Combine scores with appropriate weighting ---
+    # Adjust overall weight dynamically if one source was missing or provided no relevant info
+    total_base_weight = (face_weight_used * FACE_WEIGHT) + (voice_weight_used * VOICE_WEIGHT)
+
+    if total_base_weight > 1e-6:
+        # Normalize weights based on which sources actually contributed
+        adjusted_face_weight = (face_weight_used * FACE_WEIGHT) / total_base_weight
+        adjusted_voice_weight = (voice_weight_used * VOICE_WEIGHT) / total_base_weight
+        combined_score = (face_dep_contribution * adjusted_face_weight) + (voice_dep_contribution * adjusted_voice_weight)
+    else:
+        combined_score = 0.0 # No valid data from either source contributed
+
+    # --- Scale to 0-100 range ---
+    # Current weights range roughly from -0.8 to 0.9.
+    # Scaling (score + 1) * 50 maps [-1, 1] to [0, 100].
+    # This scaling is kept for consistency but could be refined further based
+    # on the theoretical min/max achievable score with the given weights.
     scaled_score = (combined_score + 1) * 50
-    
+
     # Ensure score is within 0-100 bounds
     final_score = max(0, min(100, scaled_score))
-    
+
     return final_score
 
 # Start the cleanup thread
@@ -384,11 +420,8 @@ def analyze_video_emotions(video_path, result_id):
             voice_data = next((item for item in voice_results if item['second'] == i),
                             {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
             
-            # Calculate depression score for this second
-            depression_score = calculate_depression_score(
-                face_data['emotions'] if face_data['emotions'] else face_data['dominant_emotion'],
-                voice_data['emotions'] if voice_data['emotions'] else voice_data['dominant_emotion']
-            )
+            # Calculate depression score for this second using the full data structure
+            depression_score = calculate_depression_score(face_data, voice_data)
             
             # Store the depression score for this second
             depression_scores_by_second.append(depression_score)
