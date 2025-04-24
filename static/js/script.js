@@ -159,6 +159,23 @@ document.addEventListener('DOMContentLoaded', function() {
                 interpretation.classList.add('alert-danger');
                 interpretation.textContent = 'High indicators of depression detected. The subject displays emotional patterns strongly associated with depression.';
             }
+            
+            // Add analysis of trend if score trend data is available
+            if (data.depression_score_trend && data.depression_score_trend.length > 0) {
+                const trend = analyzeTrend(data.depression_score_trend);
+                const trendElement = document.createElement('p');
+                trendElement.classList.add('mt-2');
+                
+                if (trend.direction === 'increasing') {
+                    trendElement.innerHTML = `<strong>Trend Analysis:</strong> Depression indicators are <span class="text-danger">increasing</span> over time, suggesting worsening mood.`;
+                } else if (trend.direction === 'decreasing') {
+                    trendElement.innerHTML = `<strong>Trend Analysis:</strong> Depression indicators are <span class="text-success">decreasing</span> over time, suggesting improving mood.`;
+                } else {
+                    trendElement.innerHTML = `<strong>Trend Analysis:</strong> Depression indicators are <span class="text-primary">stable</span> over time.`;
+                }
+                
+                interpretation.appendChild(trendElement);
+            }
         }
         
         // Prepare data for chart
@@ -192,13 +209,17 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // Determine depression score class for styling
             let depressionScoreClass = '';
+            let depressionLabel = '';
             if (depressionScore !== 'N/A') {
                 if (depressionScore < 30) {
                     depressionScoreClass = 'text-success';
+                    depressionLabel = 'Low';
                 } else if (depressionScore < 60) {
                     depressionScoreClass = 'text-warning';
+                    depressionLabel = 'Moderate';
                 } else {
                     depressionScoreClass = 'text-danger';
+                    depressionLabel = 'High';
                 }
             }
             
@@ -208,7 +229,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <td>${result.second}</td>
                 <td class="emotion-${faceEmotion}">${faceEmotion}</td>
                 <td class="emotion-${voiceEmotion}">${voiceEmotion}</td>
-                <td class="${depressionScoreClass}">${depressionScore}</td>
+                <td class="${depressionScoreClass}">${depressionScore} <span class="badge ${getBadgeClass(depressionScore)}">${depressionLabel}</span></td>
                 <td>
                     <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" 
                             data-bs-target="#details-${result.second}" aria-expanded="false">
@@ -225,7 +246,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             ${getEmotionDetailsHTML(result.voice_emotion.emotions)}
                             ${result.depression_score !== undefined ? `
                             <h6 class="mt-3">Depression Analysis:</h6>
-                            <p>Score for this moment: <strong class="${depressionScoreClass}">${depressionScore}/100</strong></p>
+                            <p>Score for this moment: <strong class="${depressionScoreClass}">${depressionScore}/100</strong> (${depressionLabel})</p>
                             ` : ''}
                         </div>
                     </div>
@@ -253,7 +274,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
         
         // Create or update charts
-        createEmotionCharts(faceEmotionCounts, voiceEmotionCounts);
+        createEmotionCharts(faceEmotionCounts, voiceEmotionCounts, data.depression_score_trend);
         
         // Set up video timeupdate event for timeline sync
         resultVideo.addEventListener('timeupdate', syncTimelineWithVideo);
@@ -370,7 +391,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    function createEmotionCharts(faceEmotionCounts, voiceEmotionCounts) {
+    function createEmotionCharts(faceEmotionCounts, voiceEmotionCounts, depressionTrend) {
         // Clear previous charts
         document.getElementById('charts-container').innerHTML = `
             <div class="row mb-4">
@@ -443,11 +464,15 @@ document.addEventListener('DOMContentLoaded', function() {
         const voiceCtx = document.getElementById('voice-emotion-chart').getContext('2d');
         voiceChart = createChart(voiceCtx, 'bar', voiceLabels, voiceData, voiceColors, 'Voice Emotions');
         
-        // Create depression trend chart (if depression scores are available)
-        if (emotionData && emotionData.length > 0 && emotionData[0].depression_score !== undefined) {
+        // Create enhanced depression trend chart using trend data if available, otherwise fallback to per-second data
+        const depressionScores = depressionTrend || (emotionData && emotionData.length > 0 ? 
+            emotionData.map(item => item.depression_score) : null);
+            
+        if (depressionScores && depressionScores.length > 0) {
             const depressionCtx = document.getElementById('depression-trend-chart').getContext('2d');
-            const depressionLabels = emotionData.map(item => `Second ${item.second}`);
-            const depressionData = emotionData.map(item => item.depression_score);
+            
+            // Create timeline labels based on data length
+            const depressionLabels = Array.from({ length: depressionScores.length }, (_, i) => `Second ${i}`);
             
             // Create gradient for depression chart
             const gradient = depressionCtx.createLinearGradient(0, 0, 0, 200);
@@ -455,19 +480,40 @@ document.addEventListener('DOMContentLoaded', function() {
             gradient.addColorStop(0.5, 'rgba(255, 193, 7, 0.8)');  // Yellow for mid
             gradient.addColorStop(1, 'rgba(40, 167, 69, 0.8)');    // Green for low
             
+            // Calculate linear regression for trendline
+            const trend = analyzeTrend(depressionScores);
+            const trendLineData = depressionScores.map((_, i) => {
+                // y = mx + b formula where b is y-intercept
+                // For first point: scores[0] = b (since x=0)
+                // For any point: y = slope*x + first_score
+                return trend.slope * i + depressionScores[0];
+            });
+            
             new Chart(depressionCtx, {
                 type: 'line',
                 data: {
                     labels: depressionLabels,
-                    datasets: [{
-                        label: 'Depression Score',
-                        data: depressionData,
-                        borderColor: 'rgba(75, 192, 192, 1)',
-                        backgroundColor: gradient,
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.4
-                    }]
+                    datasets: [
+                        {
+                            label: 'Depression Score',
+                            data: depressionScores,
+                            borderColor: 'rgba(75, 192, 192, 1)',
+                            backgroundColor: gradient,
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Trend Line',
+                            data: trendLineData,
+                            borderColor: 'rgba(255, 99, 132, 1)',
+                            borderWidth: 2,
+                            borderDash: [5, 5],
+                            fill: false,
+                            pointRadius: 0,
+                            tension: 0
+                        }
+                    ]
                 },
                 options: {
                     responsive: true,
@@ -500,7 +546,40 @@ document.addEventListener('DOMContentLoaded', function() {
                         tooltip: {
                             callbacks: {
                                 label: function(context) {
+                                    if (context.dataset.label === 'Trend Line') {
+                                        return `Trend: ${Math.round(context.raw)}/100`;
+                                    }
                                     return `Depression: ${Math.round(context.raw)}/100`;
+                                }
+                            }
+                        },
+                        annotation: {
+                            annotations: {
+                                thresholdHigh: {
+                                    type: 'line',
+                                    yMin: 60,
+                                    yMax: 60,
+                                    borderColor: 'rgba(220, 53, 69, 0.5)',
+                                    borderWidth: 1,
+                                    borderDash: [5, 5],
+                                    label: {
+                                        enabled: true,
+                                        content: 'High',
+                                        position: 'end'
+                                    }
+                                },
+                                thresholdMod: {
+                                    type: 'line',
+                                    yMin: 30,
+                                    yMax: 30,
+                                    borderColor: 'rgba(255, 193, 7, 0.5)',
+                                    borderWidth: 1,
+                                    borderDash: [5, 5],
+                                    label: {
+                                        enabled: true,
+                                        content: 'Moderate',
+                                        position: 'end'
+                                    }
                                 }
                             }
                         }
@@ -581,5 +660,52 @@ document.addEventListener('DOMContentLoaded', function() {
     function resetUploadForm() {
         uploadBtn.disabled = false;
         uploadBtn.innerHTML = 'Upload and Analyze';
+    }
+
+    // Helper function to determine badge class based on depression score
+    function getBadgeClass(score) {
+        if (score < 30) return 'bg-success';
+        if (score < 60) return 'bg-warning';
+        return 'bg-danger';
+    }
+
+    // Function to analyze trend direction in depression scores
+    function analyzeTrend(scores) {
+        if (!scores || scores.length < 3) {
+            return { direction: 'stable', slope: 0 };
+        }
+        
+        // Calculate linear regression
+        const n = scores.length;
+        const indices = Array.from({ length: n }, (_, i) => i);
+        
+        // Calculate means
+        const meanX = indices.reduce((sum, x) => sum + x, 0) / n;
+        const meanY = scores.reduce((sum, y) => sum + y, 0) / n;
+        
+        // Calculate slope (m) using least squares method
+        let numerator = 0;
+        let denominator = 0;
+        
+        for (let i = 0; i < n; i++) {
+            numerator += (indices[i] - meanX) * (scores[i] - meanY);
+            denominator += Math.pow(indices[i] - meanX, 2);
+        }
+        
+        const slope = denominator !== 0 ? numerator / denominator : 0;
+        
+        // Determine trend direction based on slope and significance threshold
+        const TREND_THRESHOLD = 0.5; // Threshold to consider a trend significant
+        
+        let direction;
+        if (slope > TREND_THRESHOLD) {
+            direction = 'increasing';
+        } else if (slope < -TREND_THRESHOLD) {
+            direction = 'decreasing';
+        } else {
+            direction = 'stable';
+        }
+        
+        return { direction, slope };
     }
 });

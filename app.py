@@ -67,22 +67,22 @@ except Exception as e:
 # --- Depression Analysis Configuration ---
 # Depression indicators in facial emotions (0-1 scale, higher means more associated with depression)
 FACE_DEPRESSION_WEIGHTS = {
-    'angry': 0.6,
-    'disgust': 0.5,
-    'fear': 0.7,
-    'happy': -0.8,  # Negative because happiness indicates less depression
-    'sad': 0.9,
-    'surprise': 0.0,
-    'neutral': 0.05,
+    'angry': 0.65,      # Increased from 0.6 - stronger correlation with depression
+    'disgust': 0.55,    # Increased from 0.5 - stronger association with negative outlook
+    'fear': 0.75,       # Increased from 0.7 - anxiety and fear are strong depression indicators
+    'happy': -0.85,     # More negative (-0.8 → -0.85) because happiness strongly contradicts depression
+    'sad': 0.95,        # Increased from 0.9 - sadness is the strongest indicator
+    'surprise': 0.1,    # Changed from 0.0 - mild association with emotional reactivity
+    'neutral': 0.15,    # Increased from 0.05 - flat affect is a stronger depression indicator
     'no face detected': 0.0  # No contribution if no face detected
 }
 
 # Depression indicators in voice emotions (0-1 scale)
 VOICE_DEPRESSION_WEIGHTS = {
-    'neu': 0.05,   # Neutral tone can indicate mild depression
-    'hap': -0.8,  # Happiness in voice suggests less depression
-    'ang': 0.5,   # Anger can be associated with depression
-    'sad': 0.9,   # Sadness strongly correlated with depression
+    'neu': 0.15,        # Increased from 0.05 - flat affect in voice is a stronger indicator
+    'hap': -0.85,       # More negative (-0.8 → -0.85) as with facial happiness
+    'ang': 0.6,         # Increased from 0.5 - stronger correlation with irritability in depression
+    'sad': 0.95,        # Increased from 0.9 - strongest indicator in voice
     'no audio extracted': 0.0,
     'audio export error': 0.0,
     'model error': 0.0,
@@ -92,8 +92,8 @@ VOICE_DEPRESSION_WEIGHTS = {
 }
 
 # Overall weighting between face and voice analysis for depression score
-FACE_WEIGHT = 0.6  # Face analysis contributes 60% to the depression score
-VOICE_WEIGHT = 0.4  # Voice analysis contributes 40% to the depression score
+FACE_WEIGHT = 0.55  # Slightly reduced from 0.6
+VOICE_WEIGHT = 0.45  # Increased from 0.4 - voice has stronger indicators of depression
 # --- End Depression Analysis Configuration ---
 
 # Preload/reuse DeepFace emotion model
@@ -107,7 +107,7 @@ class EmotionEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
-def calculate_depression_score(face_emotion_data, voice_emotion_data):
+def calculate_depression_score(face_emotion_data, voice_emotion_data, previous_scores=None):
     """
     Calculate a depression score based on face and voice emotion analysis.
     Uses detailed emotion scores when available for higher accuracy.
@@ -115,6 +115,7 @@ def calculate_depression_score(face_emotion_data, voice_emotion_data):
     Args:
         face_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
         voice_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
+        previous_scores: Optional list of previous depression scores for trend analysis
 
     Returns:
         A score between 0-100 where higher numbers indicate higher likelihood of depression
@@ -129,13 +130,17 @@ def calculate_depression_score(face_emotion_data, voice_emotion_data):
     face_dominant = face_emotion_data.get('dominant_emotion', 'no data')
 
     if face_emotions: # Prioritize detailed scores
-        total_face_score = sum(face_emotions.values()) # Normalize scores relative to their sum
+        # Use normalized scores for more accurate weighting
+        total_face_score = sum(face_emotions.values())
         if total_face_score > 1e-6: # Avoid division by zero
+            # Calculate weighted average with emotion intensities
             for emotion, score in face_emotions.items():
                 if emotion in FACE_DEPRESSION_WEIGHTS:
-                    # Weighted contribution of this emotion, normalized by total score
-                    face_dep_contribution += (score / total_face_score) * FACE_DEPRESSION_WEIGHTS[emotion]
-            face_weight_used = 1.0 # Mark that we used face data based on detailed scores
+                    norm_score = score / total_face_score
+                    # Apply exponential weighting for stronger emotions (emphasizes stronger emotions)
+                    intensity_factor = 1.0 + (0.5 * (norm_score - 0.5))
+                    face_dep_contribution += norm_score * FACE_DEPRESSION_WEIGHTS[emotion] * intensity_factor
+            face_weight_used = 1.0
         # Fallback if scores are zero/empty but dominant exists and is relevant
         elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
              face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
@@ -150,13 +155,15 @@ def calculate_depression_score(face_emotion_data, voice_emotion_data):
     voice_dominant = voice_emotion_data.get('dominant_emotion', 'no data')
 
     if voice_emotions: # Prioritize detailed scores
-        total_voice_score = sum(voice_emotions.values()) # Normalize scores
+        total_voice_score = sum(voice_emotions.values())
         if total_voice_score > 1e-6:
+            # Apply same enhanced weighting for voice emotions
             for emotion, score in voice_emotions.items():
                 if emotion in VOICE_DEPRESSION_WEIGHTS:
-                    # Weighted contribution, normalized by total score
-                    voice_dep_contribution += (score / total_voice_score) * VOICE_DEPRESSION_WEIGHTS[emotion]
-            voice_weight_used = 1.0 # Mark that we used voice data based on detailed scores
+                    norm_score = score / total_voice_score
+                    intensity_factor = 1.0 + (0.5 * (norm_score - 0.5))
+                    voice_dep_contribution += norm_score * VOICE_DEPRESSION_WEIGHTS[emotion] * intensity_factor
+            voice_weight_used = 1.0
         # Fallback if scores are zero/empty but dominant exists and is relevant
         elif voice_dominant in VOICE_DEPRESSION_WEIGHTS and VOICE_DEPRESSION_WEIGHTS[voice_dominant] != 0.0:
             voice_dep_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
@@ -178,15 +185,25 @@ def calculate_depression_score(face_emotion_data, voice_emotion_data):
     else:
         combined_score = 0.0 # No valid data from either source contributed
 
-    # --- Scale to 0-100 range ---
-    # Current weights range roughly from -0.8 to 0.9.
-    # Scaling (score + 1) * 50 maps [-1, 1] to [0, 100].
-    # This scaling is kept for consistency but could be refined further based
-    # on the theoretical min/max achievable score with the given weights.
-    scaled_score = (combined_score + 1) * 50
+    # --- Apply trend analysis if previous scores available ---
+    trend_adjusted_score = combined_score
+    if previous_scores and len(previous_scores) > 0:
+        # Calculate weighted moving average (more recent scores have higher weight)
+        weights = [0.5 + (0.5 * i / len(previous_scores)) for i in range(len(previous_scores))]
+        prev_moving_avg = sum(s * w for s, w in zip(previous_scores, weights)) / sum(weights)
+        
+        # Apply trend-based smoothing (prevents dramatic fluctuations)
+        # Use 70% current and 30% trend for stability
+        trend_adjusted_score = 0.7 * combined_score + 0.3 * prev_moving_avg
+
+    # --- Improved scaling to 0-100 range ---
+    # Better scaling based on the actual range of weights and emotional intensities
+    # Theoretical min is around -0.85 (all happy) and max is 0.95 (all sad)
+    # Map from [-0.9, 0.95] to [0, 100] for more accurate representation
+    adjusted_score = (trend_adjusted_score + 0.9) * (100 / 1.85)
 
     # Ensure score is within 0-100 bounds
-    final_score = max(0, min(100, scaled_score))
+    final_score = max(0, min(100, adjusted_score))
 
     return final_score
 
@@ -278,6 +295,7 @@ def analyze_video_emotions(video_path, result_id):
     face_results = []
     voice_results = []
     combined_results = []
+    depression_scores_by_second = []
     temp_result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{result_id}.json")
     
     try:
@@ -421,7 +439,9 @@ def analyze_video_emotions(video_path, result_id):
                             {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
             
             # Calculate depression score for this second using the full data structure
-            depression_score = calculate_depression_score(face_data, voice_data)
+            # Pass previous scores from earlier seconds for trend analysis
+            previous_scores = depression_scores_by_second[-5:] if depression_scores_by_second else None
+            depression_score = calculate_depression_score(face_data, voice_data, previous_scores)
             
             # Store the depression score for this second
             depression_scores_by_second.append(depression_score)
@@ -452,6 +472,7 @@ def analyze_video_emotions(video_path, result_id):
                 "progress": 100,
                 "total_seconds": int(duration),
                 "overall_depression_score": overall_depression_score,
+                "depression_score_trend": depression_scores_by_second,
                 "results": combined_results
             }, f, cls=EmotionEncoder)
         
