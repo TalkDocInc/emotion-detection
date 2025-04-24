@@ -147,40 +147,6 @@ class EmotionEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
-# NEW: Helper function to update progress JSON
-def update_progress(result_id, status, progress, message, duration, results=None, encoder=EmotionEncoder):
-    """Updates the progress JSON file."""
-    temp_result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{result_id}.json")
-    data_to_dump = {
-        "status": status,
-        "progress": progress,
-        "message": message,
-        "total_seconds": int(duration),
-        # Use provided results or default to empty list if None
-        "results": results if results is not None else []
-    }
-    # Add overall_depression_score if status is completed
-    if status == "completed" and results is not None:
-        # Assuming results structure includes the overall score if completed
-        # This might need adjustment based on how overall score is passed
-        if 'overall_depression_score' in data_to_dump: # Check if already added
-            pass # Already set
-        elif isinstance(results, dict) and 'overall_depression_score' in results:
-             data_to_dump['overall_depression_score'] = results['overall_depression_score']
-        # Else: cannot determine overall score from `results` input format
-
-    # Add error message if status is error
-    if status == "error" and isinstance(results, dict) and 'error' in results:
-         data_to_dump['error'] = results['error']
-
-
-    try:
-        with open(temp_result_path, 'w') as f:
-            json.dump(data_to_dump, f, cls=encoder)
-    except Exception as e:
-        print(f"Error updating progress file {temp_result_path}: {e}")
-
-
 # Renamed function: calculates the raw weighted score before non-linear scaling
 def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data, voice_acoustic_features):
     """
@@ -408,7 +374,14 @@ def analyze_video_emotions(video_path, result_id):
         audio_path = extract_audio_from_video(video_path)
         
         # Save initial progress
-        update_progress(result_id, "processing", 0, "Starting analysis...", duration)
+        with open(temp_result_path, 'w') as f:
+            json.dump({
+                "status": "processing",
+                "progress": 0,
+                "message": "Starting analysis...",
+                "total_seconds": int(duration),
+                "results": []
+            }, f, cls=EmotionEncoder)
         
         # Process video frames at 1-second intervals
         frame_interval = int(fps) if fps > 0 else 1
@@ -457,7 +430,14 @@ def analyze_video_emotions(video_path, result_id):
             
             # Update progress - Face analysis part (0% to 50%)
             progress = int((second / duration * 50) if duration > 0 else 0)
-            update_progress(result_id, "processing", progress, f"Analyzing facial emotions... ({second+1}/{int(duration)}s)", duration)
+            with open(temp_result_path, 'w') as f:
+                json.dump({
+                    "status": "processing",
+                    "progress": progress,
+                    "message": f"Analyzing facial emotions... ({second+1}/{int(duration)}s)",
+                    "total_seconds": int(duration),
+                    "results": [] # Keep results empty during processing
+                }, f, cls=EmotionEncoder)
             
             # Move to next second
             second += 1
@@ -467,7 +447,14 @@ def analyze_video_emotions(video_path, result_id):
 
         # Voice analysis part
         if audio_path:
-            update_progress(result_id, "processing", 50, "Analyzing voice emotions...", duration)
+            with open(temp_result_path, 'w') as f:
+                 json.dump({
+                    "status": "processing",
+                    "progress": 50, # Mark start of voice analysis
+                    "message": "Analyzing voice emotions...",
+                    "total_seconds": int(duration),
+                    "results": []
+                }, f, cls=EmotionEncoder)
 
             # Process voice emotion analysis using the new function
             # Pass result_id for progress updates within analyze_audio_by_second_hf
@@ -483,14 +470,28 @@ def analyze_video_emotions(video_path, result_id):
              # If audio extraction failed, create placeholder voice results
              voice_results = [{'second': s, 'dominant_emotion': 'no audio extracted', 'emotions': {}} for s in range(int(duration))]
              acoustic_features_results = [{'second': s, 'error': 'No audio extracted'} for s in range(int(duration))]
-             update_progress(result_id, "processing", 90, "Skipping voice analysis (no audio extracted)...", duration)
+             with open(temp_result_path, 'w') as f:
+                 json.dump({
+                    "status": "processing",
+                    "progress": 90, # Skip voice analysis progress
+                    "message": "Skipping voice analysis (no audio extracted)...",
+                    "total_seconds": int(duration),
+                    "results": []
+                }, f, cls=EmotionEncoder)
 
         # Combine face and voice results
         # Renamed list to store raw scores before smoothing/scaling
         raw_scores_by_second = []
 
-        update_progress(result_id, "processing", 95, "Combining results and calculating depression scores...", duration)
-        
+        with open(temp_result_path, 'w') as f:
+            json.dump({
+                "status": "processing",
+                "progress": 95,
+                "message": "Combining results and calculating depression scores...",
+                "total_seconds": int(duration),
+                "results": []
+            }, f, cls=EmotionEncoder)
+            
         # Calculate overall depression score
         total_depression_score = 0
         depression_scores_by_second = []
@@ -553,24 +554,24 @@ def analyze_video_emotions(video_path, result_id):
             overall_depression_score = np.median(smoothed_scaled_scores)
 
         # Save final results
-        final_data = {
-            "status": "completed",
-            "progress": 100,
-            "total_seconds": int(duration),
-            "overall_depression_score": overall_depression_score,
-            "results": combined_results
-        }
-        update_progress(result_id, "completed", 100, "Analysis complete.", duration, results=final_data, encoder=EmotionEncoder)
+        with open(temp_result_path, 'w') as f:
+            json.dump({
+                "status": "completed",
+                "progress": 100,
+                "total_seconds": int(duration),
+                "overall_depression_score": overall_depression_score,
+                "results": combined_results
+            }, f, cls=EmotionEncoder)
         
     except Exception as e:
         print(f"Error in analyze_video_emotions: {e}")
         # Save error status
-        error_data = {
-            "status": "error",
-            "error": str(e),
-            "results": combined_results # Include any partial results
-        }
-        update_progress(result_id, "error", -1, "Error during analysis.", duration, results=error_data, encoder=EmotionEncoder) # Use -1 progress for error?
+        with open(temp_result_path, 'w') as f:
+            json.dump({
+                "status": "error",
+                "error": str(e),
+                "results": combined_results # Include any partial results
+            }, f, cls=EmotionEncoder)
     finally:
         # Ensure video capture is released if an error occurred before release
         if 'video' in locals() and video.isOpened():
@@ -685,7 +686,14 @@ def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path
 
             # Update progress (Voice analysis part: 50% to 90%)
             progress = 50 + int(((second + 1) / duration * 40) if duration > 0 else 0)
-            update_progress(result_id, "processing", progress, f"Analyzing voice emotions & features... ({second+1}/{int(duration)}s)", duration)
+            with open(temp_result_path, 'w') as f:
+                 json.dump({
+                    "status": "processing",
+                    "progress": progress,
+                    "message": f"Analyzing voice emotions & features... ({second+1}/{int(duration)}s)",
+                    "total_seconds": int(duration),
+                    "results": [] # Keep results empty during processing
+                }, f, cls=EmotionEncoder)
 
         # Return both emotion predictions and acoustic features
         return voice_results, acoustic_features_results
