@@ -16,10 +16,11 @@ import soundfile as sf
 from pydub import AudioSegment
 import joblib
 from sklearn.preprocessing import StandardScaler
-import tempfile
 import torch
 from transformers import AutoProcessor, AutoModelForAudioClassification
 import pandas as pd # Added for rolling average
+from feat import Detector # Added for py-feat AU detection
+import tempfile
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -66,16 +67,30 @@ except Exception as e:
 # --- End Hugging Face Model Loading ---
 
 # --- Depression Analysis Configuration ---
-# Depression indicators in facial emotions (0-1 scale, higher means more associated with depression)
-FACE_DEPRESSION_WEIGHTS = {
-    'angry': 0.6,
-    'disgust': 0.5,
-    'fear': 0.7,
-    'happy': -0.8,  # Negative because happiness indicates less depression
-    'sad': 0.9,
-    'surprise': 0.0,
-    'neutral': 0.05,
-    'no face detected': 0.0  # No contribution if no face detected
+# NEW: Weights for Facial Action Units (AUs) based on intensity (assume 0-1 from py-feat for now)
+# Heuristic values, NEED TUNING. Positive means AU presence -> more depression indication.
+FACE_AU_DEPRESSION_WEIGHTS = {
+    # Inner Brow Raiser (Sadness, Fear)
+    'AU01': 0.6,
+    # Brow Lowerer (Anger, Sadness)
+    'AU04': 0.8,
+    # Cheek Raiser (Duchenne Smile marker - Happiness)
+    'AU06': -0.9, # Negative score indicates less depression
+    # Lid Tightener (Anger, Fear, Pain)
+    'AU07': 0.4,
+    # Upper Lip Raiser (Disgust, Sadness)
+    'AU10': 0.3,
+    # Lip Corner Puller (Smile marker - Happiness)
+    'AU12': -0.9, # Negative score indicates less depression
+    # Lip Corner Depressor (Sadness)
+    'AU15': 0.9,
+    # Chin Raiser (Sadness, Anger)
+    'AU17': 0.7,
+    # Lip Stretcher (Fear, Sadness)
+    'AU20': 0.5,
+    # Note: py-feat might output slightly different AU numbers/names depending on the model used.
+    # We may need to adjust these keys based on the actual output of the detector.
+    # Example only, add other relevant AUs like 23 (Lip Tightener), 25/26 (Lips part/Jaw Drop) if needed.
 }
 
 # Depression indicators in voice emotions (0-1 scale)
@@ -137,7 +152,56 @@ VOICE_ACOUSTIC_WEIGHT = 0.4 # Contribution from granular features (pitch, energy
 # --- End Depression Analysis Configuration ---
 
 # Preload/reuse DeepFace emotion model
-emotion_model = DeepFace.build_model('VGG-Face')
+# emotion_model = DeepFace.build_model('VGG-Face') # Removed: DeepFace emotion model no longer used
+
+# --- Hugging Face Model Loading ---
+# Load the processor and model once when the app starts
+# This might take a moment the first time it downloads the model
+VOICE_MODEL_NAME = "superb/wav2vec2-base-superb-er"
+try:
+    # Use AutoFeatureExtractor instead of AutoProcessor for wav2vec2 models
+    from transformers import Wav2Vec2FeatureExtractor, AutoModel, AutoConfig
+    
+    voice_config = AutoConfig.from_pretrained(VOICE_MODEL_NAME)
+    voice_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(VOICE_MODEL_NAME)
+    voice_model = AutoModel.from_pretrained(VOICE_MODEL_NAME)
+    
+    # Define emotion labels for superb/wav2vec2-base-superb-er (IEMOCAP dataset)
+    emotion_labels = ['neu', 'hap', 'ang', 'sad']
+    voice_config.id2label = {i: label for i, label in enumerate(emotion_labels)}
+    voice_config.label2id = {label: i for i, label in enumerate(emotion_labels)}
+    
+    print(f"Successfully loaded voice model: {VOICE_MODEL_NAME}")
+except Exception as e:
+    print(f"Error loading Hugging Face model {VOICE_MODEL_NAME}: {e}")
+    # Fallback or error handling if model loading fails
+    voice_feature_extractor = None
+    voice_model = None
+    voice_config = None
+
+# --- End Hugging Face Model Loading ---
+
+# --- NEW: Initialize py-feat Detector ---
+try:
+    # Initialize the detector once. Choose models (e.g., RetinaFace, RF):
+    # au_model options: 'rf', 'svm', 'logistic', 'jaanet' (requires tensorflow)
+    # face_model options: 'retinaface', 'mtcnn', 'faceboxes', 'wf'
+    # landmark_model options: 'mobilenet', 'mobilefacenet', 'pfld'
+    # emotion_model: We won't use this directly for scoring, but can keep it for potential future use/comparison.
+    face_detector = Detector(
+        face_model="retinaface", # Good general-purpose face detector
+        landmark_model="mobilenet", # Lightweight landmarks
+        au_model="xgb", # Try using XGBoost instead of SVM
+        emotion_model="svm" # Keep emotion model loaded for now if needed later
+    )
+    print("Successfully initialized py-feat detector.")
+except ImportError:
+    print("Error: py-feat library not found. Please install it: pip install py-feat[all]")
+    face_detector = None
+except Exception as e:
+    print(f"Error initializing py-feat detector: {e}")
+    face_detector = None
+# --- End py-feat Initialization ---
 
 class EmotionEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -148,13 +212,13 @@ class EmotionEncoder(json.JSONEncoder):
         return super().default(obj)
 
 # Renamed function: calculates the raw weighted score before non-linear scaling
-def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data, voice_acoustic_features):
+def calculate_raw_depression_metric(face_au_data, voice_emotion_data, voice_acoustic_features):
     """
-    Calculate a raw depression metric based on face, voice emotion, and voice acoustic features.
-    Uses detailed emotion scores when available. The score is roughly in [-1, 1].
+    Calculate a raw depression metric based on face AUs, voice emotion, and voice acoustic features.
+    The score is roughly in [-1, 1].
 
     Args:
-        face_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores).
+        face_au_data: Dict containing AU intensities for the time segment (e.g., {'AU01': 0.8, 'AU04': 0.5, 'error': None}). 'error' key indicates issues.
         voice_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores).
         voice_acoustic_features: Dict containing extracted acoustic features for the same time segment (e.g., pitch_mean, rms_std). Values might be None if extraction failed.
 
@@ -166,23 +230,27 @@ def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data, voice
     face_weight_used = 0.0  # Flag to track if face data contributed
     voice_weight_used = 0.0 # Flag to track if voice data contributed
 
-    # --- Calculate Face Depression Contribution ---
-    face_emotions = face_emotion_data.get('emotions', {})
-    face_dominant = face_emotion_data.get('dominant_emotion', 'no data')
+    # --- Calculate Face Depression Contribution (Using AUs) ---
+    if face_au_data and face_au_data.get('error') is None:
+        aus = face_au_data.get('aus', {})
+        num_aus_used = 0
+        temp_face_score = 0.0
+        if aus: # Check if the aus dictionary is not empty
+            for au_name, weight in FACE_AU_DEPRESSION_WEIGHTS.items():
+                au_intensity = aus.get(au_name)
+                # Check if AU exists, is not None/NaN, and weight is non-zero
+                if au_intensity is not None and not np.isnan(au_intensity) and abs(weight) > 1e-6:
+                    # Assuming AU intensity is roughly 0-1 (or 0-5, but weights account for scale)
+                    # No scaling applied here for now, but could be added like acoustics if needed.
+                    temp_face_score += au_intensity * weight
+                    num_aus_used += 1
 
-    if face_emotions: # Prioritize detailed scores
-        total_face_score = sum(face_emotions.values()) # Normalize scores relative to their sum
-        if total_face_score > 1e-6: # Avoid division by zero
-            for emotion, score in face_emotions.items():
-                if emotion in FACE_DEPRESSION_WEIGHTS:
-                    face_dep_contribution += (score / total_face_score) * FACE_DEPRESSION_WEIGHTS[emotion]
-            face_weight_used = 1.0
-        elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
-             face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
-             face_weight_used = 1.0
-    elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
-        face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
-        face_weight_used = 1.0
+            if num_aus_used > 0:
+                # Simple weighted sum. Could normalize by num_aus_used if desired.
+                face_dep_contribution = temp_face_score
+                face_weight_used = 1.0
+        # If aus dict is empty but no error, treat as neutral (contribution remains 0)
+    # If face_au_data has an error, contribution remains 0
 
     # --- Calculate Voice Depression Contribution (Combined Emotion + Acoustics) ---
     voice_emotion_contribution = 0.0
@@ -353,16 +421,21 @@ def upload_file():
         return jsonify({'error': 'File type not allowed'}), 400
 
 def analyze_video_emotions(video_path, result_id):
-    """Analyze emotions in the video frame by frame with both face and voice analysis"""
-    face_results = []
+    """Analyze emotions in the video frame by frame with face AU and voice analysis"""
+    face_au_results = [] # Store AU intensity results
     voice_results = []
+    acoustic_features_results = []
     combined_results = []
     temp_result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{result_id}.json")
     
     try:
-        # Check if voice model is loaded
+        # Check if models are loaded
+        if face_detector is None:
+             raise ValueError("Face detector (py-feat) failed to initialize. Cannot proceed with face analysis.")
         if voice_feature_extractor is None or voice_model is None:
-            raise ValueError("Voice emotion model failed to load. Cannot proceed with voice analysis.")
+            # Allow proceeding without voice, but log it
+            print("Warning: Voice emotion model failed to load. Proceeding without voice analysis.")
+            # We will handle this later by adjusting weights or providing default voice data
 
         # Open the video file
         video = cv2.VideoCapture(video_path)
@@ -388,57 +461,77 @@ def analyze_video_emotions(video_path, result_id):
         current_frame = 0
         second = 0
         
-        # Face analysis loop
+        # Face analysis loop (using py-feat)
         while current_frame < total_frames:
             video.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
             ret, frame = video.read()
             if not ret:
                 break
-            
-            # Process the frame with DeepFace for facial emotion
+
+            current_face_au_data = {'second': second, 'aus': {}, 'error': None}
+
+            # Process the frame with py-feat for facial action units
+            temp_image_path = None # Initialize outside try
             try:
-                emotion_analysis = DeepFace.analyze(
-                    frame, 
-                    actions=['emotion'],
-                    enforce_detection=False,
-                    silent=False                )
-                
-                # Get the dominant emotion
-                if isinstance(emotion_analysis, list):
-                    emotion_data = emotion_analysis[0]
+                # Ensure detector is available
+                if face_detector is None:
+                    raise RuntimeError("py-feat face_detector is not initialized.")
+
+                # Input frame needs to be RGB for some models
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                # --- WORKAROUND: Save numpy array to temp file --- 
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_f:
+                    temp_image_path = temp_f.name
+                    # Use cv2.imwrite to save the numpy array (frame_rgb) as an image
+                    # imwrite expects BGR, so convert back
+                    cv2.imwrite(temp_image_path, cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+                # --- END WORKAROUND ---
+
+                # Pass the file path to detect_image instead of the numpy array
+                detected_faces = face_detector.detect_image(temp_image_path, batch_size=1, output_size=(256, 256))
+
+                # Check if any faces were detected and AU data is available
+                if not detected_faces.empty and 'aus' in detected_faces.columns and not detected_faces.aus.isnull().all():
+                    # Access the first face's AU data
+                    first_face_aus = detected_faces.iloc[0]['aus']
+                    if isinstance(first_face_aus, dict): # Or check if it's a pandas Series etc.
+                        current_face_au_data['aus'] = {k: float(v) for k, v in first_face_aus.items()} # Ensure floats
+                    else:
+                        # Handle unexpected format if necessary, maybe log a warning
+                        print(f"Warning: Unexpected AU data format for second {second}: {type(first_face_aus)}")
+                        current_face_au_data['error'] = "Unexpected AU format"
                 else:
-                    emotion_data = emotion_analysis
-                
-                dominant_emotion = emotion_data['dominant_emotion']
-                emotion_scores = emotion_data['emotion']
-                
-                # Add to face results
-                face_results.append({
-                    'second': second,
-                    'dominant_emotion': dominant_emotion,
-                    'emotions': emotion_scores
-                })
-                
+                    # No face detected or no AU data extracted
+                    current_face_au_data['error'] = "no face detected"
+                    # Keep 'aus': {} empty
+
             except Exception as e:
-                # If face detection fails, log "no face detected"
-                face_results.append({
-                    'second': second,
-                    'dominant_emotion': 'no face detected',
-                    'emotions': {}
-                })
-                print(f"Error processing face in frame {current_frame}: {e}") # Keep this less verbose
-            
+                print(f"Error processing face AUs in frame {current_frame} (second {second}): {e}")
+                current_face_au_data['error'] = f"py-feat error: {str(e)}"
+                # Keep 'aus': {} empty
+            finally:
+                # Clean up the temporary image file
+                if temp_image_path and os.path.exists(temp_image_path):
+                    try:
+                        os.remove(temp_image_path)
+                    except OSError as remove_err:
+                        print(f"Error removing temporary image file {temp_image_path}: {remove_err}")
+
+            # Add to face AU results
+            face_au_results.append(current_face_au_data)
+
             # Update progress - Face analysis part (0% to 50%)
             progress = int((second / duration * 50) if duration > 0 else 0)
             with open(temp_result_path, 'w') as f:
                 json.dump({
                     "status": "processing",
                     "progress": progress,
-                    "message": f"Analyzing facial emotions... ({second+1}/{int(duration)}s)",
+                    "message": f"Analyzing facial action units... ({second+1}/{int(duration)}s)",
                     "total_seconds": int(duration),
                     "results": [] # Keep results empty during processing
                 }, f, cls=EmotionEncoder)
-            
+
             # Move to next second
             second += 1
             current_frame += frame_interval
@@ -479,8 +572,7 @@ def analyze_video_emotions(video_path, result_id):
                     "results": []
                 }, f, cls=EmotionEncoder)
 
-        # Combine face and voice results
-        # Renamed list to store raw scores before smoothing/scaling
+        # Combine results and calculate final scores
         raw_scores_by_second = []
 
         with open(temp_result_path, 'w') as f:
@@ -497,33 +589,32 @@ def analyze_video_emotions(video_path, result_id):
         depression_scores_by_second = []
             
         for i in range(int(duration)):
-            face_data = next((item for item in face_results if item['second'] == i), 
-                           {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
-            
+            # Find corresponding data for second i
+            face_data = next((item for item in face_au_results if item['second'] == i),
+                           {'second': i, 'aus': {}, 'error': 'Missing face data'}) # Default if not found
+
             voice_data = next((item for item in voice_results if item['second'] == i),
                             {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
-            
-            # Get corresponding acoustic features for this second
-            acoustic_data = next((item for item in acoustic_features_results if item['second'] == i),
-                               {'second': i, 'error': 'Missing acoustic data'}) # Default if not found
 
-            # Calculate raw depression metric for this second using face, voice emotion, and acoustic features
+            acoustic_data = next((item for item in acoustic_features_results if item['second'] == i),
+                               {'second': i, 'error': 'Missing acoustic data'})
+
+            # Calculate raw depression metric for this second using face AUs, voice emotion, and acoustic features
             raw_score = calculate_raw_depression_metric(face_data, voice_data, acoustic_data)
             raw_scores_by_second.append(raw_score)
 
             # Store combined data for later use (depression score will be added after smoothing)
             combined_results.append({
                 'second': i,
-                'face_emotion': {
-                    'dominant_emotion': face_data['dominant_emotion'],
-                    'emotions': face_data['emotions']
+                'face_analysis': { # Renamed from face_emotion
+                    'aus': face_data.get('aus', {}),
+                    'error': face_data.get('error')
                 },
                 'voice_emotion': {
                     'dominant_emotion': voice_data['dominant_emotion'],
                     'emotions': voice_data['emotions']
                 },
-                # Add acoustic features to the combined results for potential display/debugging
-                'voice_acoustic_features': {k: v for k, v in acoustic_data.items() if k != 'second' and k != 'error'}, # Store features, remove second/error
+                'voice_acoustic_features': {k: v for k, v in acoustic_data.items() if k != 'second' and k != 'error' and v is not None and not (isinstance(v, float) and np.isnan(v))},
                 # 'depression_score': depression_score # This will be added later after smoothing
             })
         
