@@ -178,15 +178,18 @@ def calculate_depression_score(face_emotion_data, voice_emotion_data):
     else:
         combined_score = 0.0 # No valid data from either source contributed
 
-    # --- Scale to 0-100 range ---
-    # Current weights range roughly from -0.8 to 0.9.
-    # Scaling (score + 1) * 50 maps [-1, 1] to [0, 100].
-    # This scaling is kept for consistency but could be refined further based
-    # on the theoretical min/max achievable score with the given weights.
-    scaled_score = (combined_score + 1) * 50
+    # --- Non-linear scaling to enhance sensitivity at higher depression likelihoods ---
+    # We apply a logistic (sigmoid) transformation so that small positive changes
+    # in the combined score, when already high, lead to larger increases in the
+    # final depression score. Likewise, strongly negative combined scores will be
+    # compressed towards 0.  The constant K controls the steepness of the curve.
+    K = 3  # Steepness factor – tweakable via future calibration
 
-    # Ensure score is within 0-100 bounds
-    final_score = max(0, min(100, scaled_score))
+    # Sigmoid mapping from combined_score∈[-1,1] (approx) to (0,1)
+    sigmoid_score = 1.0 / (1.0 + np.exp(-K * combined_score))
+
+    # Scale to 0-100
+    final_score = sigmoid_score * 100
 
     return final_score
 
