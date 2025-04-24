@@ -10,6 +10,10 @@ A web application that analyzes emotions in uploaded video footage on a second-b
 - Visual representation of emotion distribution
 - Detailed emotion scores for each second of video
 
+## Disclaimer
+
+**This application is for informational and entertainment purposes only. It is not a medical tool and should not be used to diagnose or assess mental health conditions, including depression. The emotion detection is based on algorithmic analysis of facial expressions and may not accurately reflect a person's true emotional state or mental health.**
+
 ## Technology Stack
 
 - **Backend**: Python with Flask
