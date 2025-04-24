@@ -244,6 +244,7 @@ def calculate_raw_depression_metric(face_au_data, voice_emotion_data, voice_acou
                 # Simple weighted sum. Could normalize by num_aus_used if desired.
                 face_dep_contribution = temp_face_score
                 face_weight_used = 1.0
+                print(f"Face depression contribution: {face_dep_contribution}")
         # If aus dict is empty but no error, treat as neutral (contribution remains 0)
     # If face_au_data has an error, contribution remains 0
 
@@ -495,15 +496,11 @@ def analyze_video_emotions(video_path, result_id):
                 # breakpoint() # Removed breakpoint
 
                 # Check if any faces were detected and AU data is available
-                if not detected_faces.empty and 'aus' in detected_faces.columns and not detected_faces.aus.isnull().all():
+                if not detected_faces.empty:
                     # Access the first face's AU data
-                    first_face_aus = detected_faces.iloc[0]['aus']
-                    if isinstance(first_face_aus, dict): # Or check if it's a pandas Series etc.
-                        current_face_au_data['aus'] = {k: float(v) for k, v in first_face_aus.items()} # Ensure floats
-                    else:
-                        # Handle unexpected format if necessary, maybe log a warning
-                        print(f"Warning: Unexpected AU data format for second {second}: {type(first_face_aus)}")
-                        current_face_au_data['error'] = "Unexpected AU format"
+                    first_face_aus = detected_faces.aus
+                    print(f"First face AU data: {first_face_aus}")
+                    current_face_au_data['aus'] = {k: float(v) for k, v in first_face_aus.items()} # Ensure floats
                 else:
                     # No face detected or no AU data extracted
                     current_face_au_data['error'] = "no face detected"

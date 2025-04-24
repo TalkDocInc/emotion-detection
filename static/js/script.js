@@ -257,10 +257,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     </button>
                     <div class="collapse mt-2" id="details-${result.second}">
                         <div class="card card-body">
-                            <h6>Face Emotions:</h6>
-                            ${getEmotionDetailsHTML(result.face_emotion.emotions)}
+                            <h6>Face AUs / Status:</h6>
+                            ${getAnalysisDetailsHTML(result.face_analysis, 'face')}
                             <h6 class="mt-3">Voice Emotions:</h6>
-                            ${getEmotionDetailsHTML(result.voice_emotion.emotions)}
+                            ${getAnalysisDetailsHTML(result.voice_emotion, 'voice')}
                             ${result.depression_score !== undefined ? `
                             <h6 class="mt-3">Depression Analysis:</h6>
                             <p>Score for this moment: <strong class="${depressionScoreClass}">${depressionScore}/100</strong></p>
@@ -333,19 +333,51 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    function getEmotionDetailsHTML(emotions) {
-        if (!emotions || Object.keys(emotions).length === 0) {
-            return 'No detailed emotion data available';
+    // Renamed and modified to handle both face AUs/errors and voice emotions
+    function getAnalysisDetailsHTML(analysisData, type = 'voice') {
+        if (!analysisData) {
+            return 'No analysis data available';
         }
         
-        let html = '<ul class="list-group">';
-        for (const [emotion, score] of Object.entries(emotions)) {
-            html += `<li class="list-group-item d-flex justify-content-between align-items-center">
-                        <span>${emotion}</span>
-                        <span class="badge bg-primary rounded-pill">${(score * 100).toFixed(2)}%</span>
-                     </li>`;
+        let html = '';
+        if (type === 'face') {
+            if (analysisData.error) {
+                html = `<p class="text-danger">Status: ${analysisData.error}</p>`;
+            } else if (analysisData.aus && Object.keys(analysisData.aus).length > 0) {
+                html = '<ul class="list-group">';
+                html += '<li class="list-group-item list-group-item-secondary"><strong>Action Unit: Intensity</strong></li>'; // Header
+                for (const [au, intensity] of Object.entries(analysisData.aus)) {
+                     // Format intensity nicely (e.g., fixed decimals)
+                    const formattedIntensity = typeof intensity === 'number' ? intensity.toFixed(2) : intensity;
+                    html += `<li class="list-group-item d-flex justify-content-between align-items-center">
+                                <span>${au}</span>
+                                <span class="badge bg-secondary rounded-pill">${formattedIntensity}</span> 
+                             </li>`; // Use a different badge style for AUs
+                }
+                html += '</ul>';
+            } else {
+                html = 'No Action Units detected or reported.';
+            }
+        } else { // Assume voice type
+            const emotions = analysisData.emotions;
+            if (!emotions || Object.keys(emotions).length === 0) {
+                // Handle cases like 'no audio detected' where dominant_emotion exists but emotions might be empty
+                if (analysisData.dominant_emotion && analysisData.dominant_emotion !== 'no data') {
+                     return `Status: ${analysisData.dominant_emotion}`;
+                }
+                return 'No detailed emotion data available';
+            }
+
+            html = '<ul class="list-group">';
+             html += '<li class="list-group-item list-group-item-secondary"><strong>Emotion: Score</strong></li>'; // Header
+            for (const [emotion, score] of Object.entries(emotions)) {
+                html += `<li class="list-group-item d-flex justify-content-between align-items-center">
+                            <span>${emotion}</span>
+                            <span class="badge bg-primary rounded-pill">${(score * 100).toFixed(2)}%</span>
+                         </li>`;
+            }
+            html += '</ul>';
         }
-        html += '</ul>';
         return html;
     }
     
