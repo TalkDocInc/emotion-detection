@@ -78,3 +78,7 @@ A web application that analyzes emotions in uploaded video footage on a second-b
 ## License
 
 MIT
+
+## Disclaimer
+
+This code is not designed to diagnose depression.
