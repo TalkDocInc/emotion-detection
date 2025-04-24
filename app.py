@@ -131,8 +131,8 @@ VOICE_ACOUSTIC_DEPRESSION_WEIGHTS = {
 }
 
 # Weighting between voice emotion category and acoustic features
-VOICE_EMOTION_WEIGHT = 0.6 # Contribution from categorical emotion (e.g., 'sad')
-VOICE_ACOUSTIC_WEIGHT = 0.4 # Contribution from granular features (pitch, energy, etc.)
+VOICE_EMOTION_WEIGHT = 0.8 # Contribution from categorical emotion (e.g., 'sad')
+VOICE_ACOUSTIC_WEIGHT = 0.2 # Contribution from granular features (pitch, energy, etc.)
 
 # --- End Depression Analysis Configuration ---
 
