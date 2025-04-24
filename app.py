@@ -73,13 +73,13 @@ FACE_DEPRESSION_WEIGHTS = {
     'happy': -0.8,  # Negative because happiness indicates less depression
     'sad': 0.9,
     'surprise': 0.0,
-    'neutral': 0.3,
+    'neutral': 0.05,
     'no face detected': 0.0  # No contribution if no face detected
 }
 
 # Depression indicators in voice emotions (0-1 scale)
 VOICE_DEPRESSION_WEIGHTS = {
-    'neu': 0.3,   # Neutral tone can indicate mild depression
+    'neu': 0.05,   # Neutral tone can indicate mild depression
     'hap': -0.8,  # Happiness in voice suggests less depression
     'ang': 0.5,   # Anger can be associated with depression
     'sad': 0.9,   # Sadness strongly correlated with depression
