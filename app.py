@@ -154,33 +154,6 @@ VOICE_ACOUSTIC_WEIGHT = 0.4 # Contribution from granular features (pitch, energy
 # Preload/reuse DeepFace emotion model
 # emotion_model = DeepFace.build_model('VGG-Face') # Removed: DeepFace emotion model no longer used
 
-# --- Hugging Face Model Loading ---
-# Load the processor and model once when the app starts
-# This might take a moment the first time it downloads the model
-VOICE_MODEL_NAME = "superb/wav2vec2-base-superb-er"
-try:
-    # Use AutoFeatureExtractor instead of AutoProcessor for wav2vec2 models
-    from transformers import Wav2Vec2FeatureExtractor, AutoModel, AutoConfig
-    
-    voice_config = AutoConfig.from_pretrained(VOICE_MODEL_NAME)
-    voice_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(VOICE_MODEL_NAME)
-    voice_model = AutoModel.from_pretrained(VOICE_MODEL_NAME)
-    
-    # Define emotion labels for superb/wav2vec2-base-superb-er (IEMOCAP dataset)
-    emotion_labels = ['neu', 'hap', 'ang', 'sad']
-    voice_config.id2label = {i: label for i, label in enumerate(emotion_labels)}
-    voice_config.label2id = {label: i for i, label in enumerate(emotion_labels)}
-    
-    print(f"Successfully loaded voice model: {VOICE_MODEL_NAME}")
-except Exception as e:
-    print(f"Error loading Hugging Face model {VOICE_MODEL_NAME}: {e}")
-    # Fallback or error handling if model loading fails
-    voice_feature_extractor = None
-    voice_model = None
-    voice_config = None
-
-# --- End Hugging Face Model Loading ---
-
 # --- NEW: Initialize py-feat Detector ---
 try:
     # Initialize the detector once. Choose models (e.g., RetinaFace, RF):
@@ -189,7 +162,6 @@ try:
     # landmark_model options: 'mobilenet', 'mobilefacenet', 'pfld'
     # emotion_model: We won't use this directly for scoring, but can keep it for potential future use/comparison.
     face_detector = Detector(
-        face_model="retinaface", # Good general-purpose face detector
         landmark_model="mobilenet", # Lightweight landmarks
         au_model="xgb", # Try using XGBoost instead of SVM
         emotion_model="svm" # Keep emotion model loaded for now if needed later
@@ -210,6 +182,29 @@ class EmotionEncoder(json.JSONEncoder):
         if isinstance(obj, np.float32):
             return float(obj)
         return super().default(obj)
+
+# Helper function to update the progress JSON file
+def update_progress(result_id, status, progress, message, total_seconds, results=None):
+    """Updates the JSON progress file."""
+    temp_result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{result_id}.json")
+    data_to_dump = {
+        "status": status,
+        "progress": progress,
+        "message": message,
+        "total_seconds": int(total_seconds)
+    }
+    # Only include results if they are provided (usually for final or error states)
+    if results is not None:
+        data_to_dump["results"] = results
+    else:
+        # Ensure results key exists even during processing if not provided
+        data_to_dump["results"] = [] # Keep results empty/as-is during processing
+
+    try:
+        with open(temp_result_path, 'w') as f:
+            json.dump(data_to_dump, f, cls=EmotionEncoder)
+    except Exception as e:
+        print(f"Error updating progress file {temp_result_path}: {e}")
 
 # Renamed function: calculates the raw weighted score before non-linear scaling
 def calculate_raw_depression_metric(face_au_data, voice_emotion_data, voice_acoustic_features):
@@ -447,14 +442,7 @@ def analyze_video_emotions(video_path, result_id):
         audio_path = extract_audio_from_video(video_path)
         
         # Save initial progress
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "processing",
-                "progress": 0,
-                "message": "Starting analysis...",
-                "total_seconds": int(duration),
-                "results": []
-            }, f, cls=EmotionEncoder)
+        update_progress(result_id, "processing", 0, "Starting analysis...", duration)
         
         # Process video frames at 1-second intervals
         frame_interval = int(fps) if fps > 0 else 1
@@ -468,6 +456,18 @@ def analyze_video_emotions(video_path, result_id):
             if not ret:
                 break
 
+            # --- Resize Frame to 720p (Maintain Aspect Ratio) ---
+            target_height = 720
+            h, w = frame.shape[:2]
+            if h > target_height:
+                ratio = target_height / h
+                target_width = int(w * ratio)
+                frame_resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+            else:
+                # If frame height is already <= 720p, use original
+                frame_resized = frame
+            # --- End Resize ---
+
             current_face_au_data = {'second': second, 'aus': {}, 'error': None}
 
             # Process the frame with py-feat for facial action units
@@ -477,19 +477,22 @@ def analyze_video_emotions(video_path, result_id):
                 if face_detector is None:
                     raise RuntimeError("py-feat face_detector is not initialized.")
 
+                # Use the resized frame
                 # Input frame needs to be RGB for some models
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB) # Use frame_resized
 
                 # --- WORKAROUND: Save numpy array to temp file --- 
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_f:
                     temp_image_path = temp_f.name
                     # Use cv2.imwrite to save the numpy array (frame_rgb) as an image
                     # imwrite expects BGR, so convert back
-                    cv2.imwrite(temp_image_path, cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(temp_image_path, cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)) # Use frame_rgb
                 # --- END WORKAROUND ---
 
                 # Pass the file path to detect_image instead of the numpy array
-                detected_faces = face_detector.detect_image(temp_image_path, batch_size=1, output_size=(256, 256))
+                # No need for output_size here as we resized manually
+                detected_faces = face_detector.detect(temp_image_path, batch_size=1)
+                # breakpoint() # Removed breakpoint
 
                 # Check if any faces were detected and AU data is available
                 if not detected_faces.empty and 'aus' in detected_faces.columns and not detected_faces.aus.isnull().all():
@@ -523,14 +526,7 @@ def analyze_video_emotions(video_path, result_id):
 
             # Update progress - Face analysis part (0% to 50%)
             progress = int((second / duration * 50) if duration > 0 else 0)
-            with open(temp_result_path, 'w') as f:
-                json.dump({
-                    "status": "processing",
-                    "progress": progress,
-                    "message": f"Analyzing facial action units... ({second+1}/{int(duration)}s)",
-                    "total_seconds": int(duration),
-                    "results": [] # Keep results empty during processing
-                }, f, cls=EmotionEncoder)
+            update_progress(result_id, "processing", progress, f"Analyzing facial action units... ({second+1}/{int(duration)}s)", duration)
 
             # Move to next second
             second += 1
@@ -540,14 +536,7 @@ def analyze_video_emotions(video_path, result_id):
 
         # Voice analysis part
         if audio_path:
-            with open(temp_result_path, 'w') as f:
-                 json.dump({
-                    "status": "processing",
-                    "progress": 50, # Mark start of voice analysis
-                    "message": "Analyzing voice emotions...",
-                    "total_seconds": int(duration),
-                    "results": []
-                }, f, cls=EmotionEncoder)
+            update_progress(result_id, "processing", 50, "Analyzing voice emotions...", duration)
 
             # Process voice emotion analysis using the new function
             # Pass result_id for progress updates within analyze_audio_by_second_hf
@@ -563,30 +552,10 @@ def analyze_video_emotions(video_path, result_id):
              # If audio extraction failed, create placeholder voice results
              voice_results = [{'second': s, 'dominant_emotion': 'no audio extracted', 'emotions': {}} for s in range(int(duration))]
              acoustic_features_results = [{'second': s, 'error': 'No audio extracted'} for s in range(int(duration))]
-             with open(temp_result_path, 'w') as f:
-                 json.dump({
-                    "status": "processing",
-                    "progress": 90, # Skip voice analysis progress
-                    "message": "Skipping voice analysis (no audio extracted)...",
-                    "total_seconds": int(duration),
-                    "results": []
-                }, f, cls=EmotionEncoder)
+             update_progress(result_id, "processing", 90, "Skipping voice analysis (no audio extracted)...", duration)
 
         # Combine results and calculate final scores
         raw_scores_by_second = []
-
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "processing",
-                "progress": 95,
-                "message": "Combining results and calculating depression scores...",
-                "total_seconds": int(duration),
-                "results": []
-            }, f, cls=EmotionEncoder)
-            
-        # Calculate overall depression score
-        total_depression_score = 0
-        depression_scores_by_second = []
             
         for i in range(int(duration)):
             # Find corresponding data for second i
@@ -645,24 +614,13 @@ def analyze_video_emotions(video_path, result_id):
             overall_depression_score = np.median(smoothed_scaled_scores)
 
         # Save final results
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "completed",
-                "progress": 100,
-                "total_seconds": int(duration),
-                "overall_depression_score": overall_depression_score,
-                "results": combined_results
-            }, f, cls=EmotionEncoder)
+        update_progress(result_id, "completed", 100, "Analysis complete", duration, combined_results)
+        update_progress(result_id, "completed", 100, f"Analysis complete. Overall Depression Score: {overall_depression_score:.2f}", duration, combined_results)
         
     except Exception as e:
         print(f"Error in analyze_video_emotions: {e}")
         # Save error status
-        with open(temp_result_path, 'w') as f:
-            json.dump({
-                "status": "error",
-                "error": str(e),
-                "results": combined_results # Include any partial results
-            }, f, cls=EmotionEncoder)
+        update_progress(result_id, "error", -1, f"Error: {str(e)}", duration if 'duration' in locals() else 0, combined_results if 'combined_results' in locals() else [])
     finally:
         # Ensure video capture is released if an error occurred before release
         if 'video' in locals() and video.isOpened():
@@ -777,14 +735,7 @@ def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path
 
             # Update progress (Voice analysis part: 50% to 90%)
             progress = 50 + int(((second + 1) / duration * 40) if duration > 0 else 0)
-            with open(temp_result_path, 'w') as f:
-                 json.dump({
-                    "status": "processing",
-                    "progress": progress,
-                    "message": f"Analyzing voice emotions & features... ({second+1}/{int(duration)}s)",
-                    "total_seconds": int(duration),
-                    "results": [] # Keep results empty during processing
-                }, f, cls=EmotionEncoder)
+            update_progress(result_id, "processing", progress, f"Analyzing voice emotions & features... ({second+1}/{int(duration)}s)", duration)
 
         # Return both emotion predictions and acoustic features
         return voice_results, acoustic_features_results

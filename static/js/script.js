@@ -16,6 +16,25 @@ document.addEventListener('DOMContentLoaded', function() {
     let emotionData = [];
     let currentActiveRow = null;
 
+    // Color palette for emotions (moved to higher scope)
+    const colors = {
+        'angry': '#dc3545',      // red
+        'disgust': '#20c997',    // teal
+        'fear': '#6610f2',       // purple
+        'happy': '#28a745',      // green
+        'sad': '#6c757d',        // gray
+        'surprise': '#fd7e14',   // orange
+        'neutral': '#007bff',    // blue
+        'no face detected': '#17a2b8',  // cyan
+        'AUs Detected': '#007bff', // blue (like neutral)
+        'No AUs': '#6c757d', // gray (like sad/neutral)
+        'error': '#ffc107', // yellow/warning for general face errors
+        'no audio detected': '#17a2b8', // cyan
+        'model error': '#ffc107',       // yellow/warning for model errors
+        'analysis error': '#ffc107',   // yellow/warning for analysis errors
+        'prediction error': '#ffc107' // yellow/warning for prediction errors
+    };
+
     // Handle form submission
     uploadForm.addEventListener('submit', function(e) {
         e.preventDefault();
@@ -164,7 +183,10 @@ document.addEventListener('DOMContentLoaded', function() {
         // Prepare data for chart
         const faceEmotionCounts = {
             'angry': 0, 'disgust': 0, 'fear': 0, 'happy': 0, 'sad': 0, 
-            'surprise': 0, 'neutral': 0, 'no face detected': 0
+            'surprise': 0, 'neutral': 0, 'no face detected': 0,
+            'AUs Detected': 0,
+            'No AUs': 0,
+            'error': 0 // Count generic face errors separately
         };
         
         const voiceEmotionCounts = {
@@ -185,7 +207,23 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Generate result rows
         data.results.forEach(result => {
-            const faceEmotion = result.face_emotion.dominant_emotion;
+            // --- Updated Face Analysis Handling ---
+            const faceAnalysis = result.face_analysis;
+            let faceDisplay = 'Unknown';
+            let faceClass = 'unknown'; // Class for styling
+
+            if (faceAnalysis && faceAnalysis.error) {
+                faceDisplay = faceAnalysis.error; // Show the specific error
+                faceClass = 'error'; // Use a generic error class
+            } else if (faceAnalysis && faceAnalysis.aus && Object.keys(faceAnalysis.aus).length > 0) {
+                faceDisplay = 'AUs Detected';
+                faceClass = 'detected';
+            } else if (faceAnalysis) {
+                faceDisplay = 'No AUs'; // Face detected, but no AUs extracted
+                faceClass = 'no-aus';
+            }
+            // --- End Updated Face Analysis Handling ---
+
             const voiceEmotion = result.voice_emotion.dominant_emotion;
             const depressionScore = result.depression_score !== undefined ? 
                 Math.round(result.depression_score) : 'N/A';
@@ -206,7 +244,7 @@ document.addEventListener('DOMContentLoaded', function() {
             row.id = `second-${result.second}`;
             row.innerHTML = `
                 <td>${result.second}</td>
-                <td class="emotion-${faceEmotion}">${faceEmotion}</td>
+                <td class="face-status-${faceClass}">${faceDisplay}</td>
                 <td class="emotion-${voiceEmotion}">${voiceEmotion}</td>
                 <td class="${depressionScoreClass}">${depressionScore}</td>
                 <td>
@@ -234,8 +272,11 @@ document.addEventListener('DOMContentLoaded', function() {
             emotionResults.appendChild(row);
             
             // Update emotion counts for charts
-            if (faceEmotion in faceEmotionCounts) {
-                faceEmotionCounts[faceEmotion]++;
+            if (faceClass === 'error') {
+                // Group all specific face errors under a general 'error' count for the chart
+                faceEmotionCounts['error']++; 
+            } else if (faceDisplay in faceEmotionCounts) {
+                faceEmotionCounts[faceDisplay]++;
             }
             
             if (voiceEmotion in voiceEmotionCounts) {
@@ -308,68 +349,6 @@ document.addEventListener('DOMContentLoaded', function() {
         return html;
     }
     
-    function createEmotionChart(emotionCounts) {
-        const ctx = document.getElementById('emotion-chart').getContext('2d');
-        
-        // Destroy previous chart if it exists
-        if (emotionChart) {
-            emotionChart.destroy();
-        }
-        
-        const colors = {
-            'angry': '#dc3545',
-            'disgust': '#20c997',
-            'fear': '#6610f2',
-            'happy': '#28a745',
-            'sad': '#6c757d',
-            'surprise': '#fd7e14',
-            'neutral': '#007bff'
-        };
-        
-        emotionChart = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: Object.keys(emotionCounts),
-                datasets: [{
-                    label: 'Emotion Distribution',
-                    data: Object.values(emotionCounts),
-                    backgroundColor: Object.keys(emotionCounts).map(emotion => colors[emotion] || '#17a2b8'),
-                    borderColor: Object.keys(emotionCounts).map(emotion => colors[emotion] || '#17a2b8'),
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: {
-                            display: true,
-                            text: 'Frequency (seconds)'
-                        }
-                    },
-                    x: {
-                        title: {
-                            display: true,
-                            text: 'Emotion'
-                        }
-                    }
-                },
-                plugins: {
-                    legend: {
-                        display: false
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                return `${context.raw} seconds`;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-    
     function createEmotionCharts(faceEmotionCounts, voiceEmotionCounts) {
         // Clear previous charts
         document.getElementById('charts-container').innerHTML = `
@@ -409,27 +388,14 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
         `;
         
-        // Color palette for emotions
-        const colors = {
-            'angry': '#dc3545',      // red
-            'disgust': '#20c997',    // teal
-            'fear': '#6610f2',       // purple
-            'happy': '#28a745',      // green
-            'sad': '#6c757d',        // gray
-            'surprise': '#fd7e14',   // orange
-            'neutral': '#007bff',    // blue
-            'no face detected': '#17a2b8',  // cyan
-            'no audio detected': '#17a2b8'  // cyan
-        };
-        
         // Store chart instances for later reference
         let faceChart = null;
         let voiceChart = null;
 
-        // Filter out emotions with zero counts
+        // Filter out face statuses/emotions with zero counts
         const faceLabels = Object.keys(faceEmotionCounts).filter(emotion => faceEmotionCounts[emotion] > 0);
         const faceData = faceLabels.map(emotion => faceEmotionCounts[emotion]);
-        const faceColors = faceLabels.map(emotion => colors[emotion] || '#17a2b8');
+        const faceColors = faceLabels.map(label => colors[label] || colors['error'] || '#ffc107');
         
         const voiceLabels = Object.keys(voiceEmotionCounts).filter(emotion => voiceEmotionCounts[emotion] > 0);
         const voiceData = voiceLabels.map(emotion => voiceEmotionCounts[emotion]);
