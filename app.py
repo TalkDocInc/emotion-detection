@@ -19,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 import tempfile
 import torch
 from transformers import AutoProcessor, AutoModelForAudioClassification
+import pandas as pd # Added for rolling average
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -107,17 +108,18 @@ class EmotionEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
-def calculate_depression_score(face_emotion_data, voice_emotion_data):
+# Renamed function: calculates the raw weighted score before non-linear scaling
+def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data):
     """
-    Calculate a depression score based on face and voice emotion analysis.
-    Uses detailed emotion scores when available for higher accuracy.
+    Calculate a raw depression metric based on face and voice emotion analysis.
+    Uses detailed emotion scores when available. The score is roughly in [-1, 1].
 
     Args:
         face_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
         voice_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
 
     Returns:
-        A score between 0-100 where higher numbers indicate higher likelihood of depression
+        A raw score roughly between -1 and 1, representing weighted depression indication.
     """
     face_dep_contribution = 0.0
     voice_dep_contribution = 0.0
@@ -178,20 +180,8 @@ def calculate_depression_score(face_emotion_data, voice_emotion_data):
     else:
         combined_score = 0.0 # No valid data from either source contributed
 
-    # --- Non-linear scaling to enhance sensitivity at higher depression likelihoods ---
-    # We apply a logistic (sigmoid) transformation so that small positive changes
-    # in the combined score, when already high, lead to larger increases in the
-    # final depression score. Likewise, strongly negative combined scores will be
-    # compressed towards 0.  The constant K controls the steepness of the curve.
-    K = 3  # Steepness factor – tweakable via future calibration
-
-    # Sigmoid mapping from combined_score∈[-1,1] (approx) to (0,1)
-    sigmoid_score = 1.0 / (1.0 + np.exp(-K * combined_score))
-
-    # Scale to 0-100
-    final_score = sigmoid_score * 100
-
-    return final_score
+    # Return the raw combined score before non-linear transformation
+    return combined_score
 
 # Start the cleanup thread
 def cleanup_old_files():
@@ -403,6 +393,9 @@ def analyze_video_emotions(video_path, result_id):
                 }, f, cls=EmotionEncoder)
 
         # Combine face and voice results
+        # Renamed list to store raw scores before smoothing/scaling
+        raw_scores_by_second = []
+
         with open(temp_result_path, 'w') as f:
             json.dump({
                 "status": "processing",
@@ -423,15 +416,11 @@ def analyze_video_emotions(video_path, result_id):
             voice_data = next((item for item in voice_results if item['second'] == i),
                             {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
             
-            # Calculate depression score for this second using the full data structure
-            depression_score = calculate_depression_score(face_data, voice_data)
-            
-            # Store the depression score for this second
-            depression_scores_by_second.append(depression_score)
-            
-            # Add to the running total for the overall score
-            total_depression_score += depression_score
-            
+            # Calculate raw depression metric for this second
+            raw_score = calculate_raw_depression_metric(face_data, voice_data)
+            raw_scores_by_second.append(raw_score)
+
+            # Store combined data for later use (depression score will be added after smoothing)
             combined_results.append({
                 'second': i,
                 'face_emotion': {
@@ -442,12 +431,35 @@ def analyze_video_emotions(video_path, result_id):
                     'dominant_emotion': voice_data['dominant_emotion'],
                     'emotions': voice_data['emotions']
                 },
-                'depression_score': depression_score
+                # 'depression_score': depression_score # Remove placeholder
             })
         
-        # Calculate overall depression score (median of all seconds)
-        overall_depression_score = np.median(depression_scores_by_second) if depression_scores_by_second else 0
-        
+        # --- Temporal Smoothing and Final Score Calculation ---
+        K = 3 # Sigmoid steepness factor
+        smoothed_scaled_scores = []
+        overall_depression_score = 0 # Default
+
+        if raw_scores_by_second:
+            # Apply rolling average (window of 5, centered)
+            # Use pandas Series for easy rolling calculation
+            raw_series = pd.Series(raw_scores_by_second)
+            # Window size 5, center=True, min_periods=1 to handle edges
+            smoothed_raw_scores = raw_series.rolling(window=5, center=True, min_periods=1).mean().tolist()
+
+            # Apply sigmoid and scaling to smoothed scores
+            for raw_smoothed_score in smoothed_raw_scores:
+                sigmoid_score = 1.0 / (1.0 + np.exp(-K * raw_smoothed_score))
+                final_score = sigmoid_score * 100
+                smoothed_scaled_scores.append(final_score)
+
+            # Add the final smoothed+scaled score back to combined_results
+            for idx, score in enumerate(smoothed_scaled_scores):
+                if idx < len(combined_results):
+                    combined_results[idx]['depression_score'] = score
+
+            # Calculate overall depression score (median of smoothed+scaled scores)
+            overall_depression_score = np.median(smoothed_scaled_scores)
+
         # Save final results
         with open(temp_result_path, 'w') as f:
             json.dump({
