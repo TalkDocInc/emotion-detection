@@ -12,3 +12,4 @@ joblib
 pydub
 transformers
 torch
+tf-keras
