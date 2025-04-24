@@ -95,6 +95,45 @@ VOICE_DEPRESSION_WEIGHTS = {
 # Overall weighting between face and voice analysis for depression score
 FACE_WEIGHT = 0.6  # Face analysis contributes 60% to the depression score
 VOICE_WEIGHT = 0.4  # Voice analysis contributes 40% to the depression score
+
+# NEW: Parameters for scaling acoustic features using tanh((value - center) / scale)
+# These are heuristic estimates and require tuning!
+ACOUSTIC_FEATURE_SCALING_PARAMS = {
+    # Feature: {'center': typical_value, 'scale': typical_range_or_std_dev}
+    'rms_mean': {'center': 0.05, 'scale': 0.05},    # Assumes audio normalized somewhat, range ~0 to 0.1+
+    'rms_std': {'center': 0.01, 'scale': 0.01},     # Std dev likely smaller
+    'spectral_centroid_mean': {'center': 1500, 'scale': 1000}, # Wide range, center guess
+    'spectral_centroid_std': {'center': 500, 'scale': 500},    # Std dev also varies
+    'zcr_mean': {'center': 0.1, 'scale': 0.1},      # Range 0-1 approx
+    'zcr_std': {'center': 0.05, 'scale': 0.05},     # Std dev likely smaller
+    'pitch_mean': {'center': 150, 'scale': 50},      # Center for typical voice, scale covers reasonable range (Hz)
+    'pitch_std': {'center': 20, 'scale': 20},       # Typical pitch std dev (Hz), scale allows variation
+    'mfcc_mean_std': {'center': 10, 'scale': 10}      # Wild guess, depends heavily on MFCC implementation
+}
+
+# REVISED: Weights for Granular Acoustic Features (applied AFTER scaling to approx [-1, 1])
+# Weights can now be more intuitive (closer to -1 to 1 range)
+VOICE_ACOUSTIC_DEPRESSION_WEIGHTS = {
+    # Energy (RMS)
+    'rms_mean': -0.3, # Lower scaled energy -> more depression
+    'rms_std': -0.4,  # Lower scaled energy variation -> more depression
+    # Spectral Centroid (Brightness)
+    'spectral_centroid_mean': -0.2, # Lower scaled brightness -> more depression
+    'spectral_centroid_std': -0.2,  # Lower scaled brightness variation -> more depression
+    # Zero Crossing Rate (Noisiness/Voiced detection) - still less clear link
+    'zcr_mean': 0.0,
+    'zcr_std': 0.0,
+    # Pitch (F0) - Stronger indicators
+    'pitch_mean': -0.5, # Lower scaled pitch -> more depression
+    'pitch_std': -0.7, # Lower scaled pitch variation (monotone) -> more depression
+    # MFCCs (Timbre)
+    'mfcc_mean_std': -0.3 # Lower scaled variation across MFCC means -> flatter timbre
+}
+
+# Weighting between voice emotion category and acoustic features
+VOICE_EMOTION_WEIGHT = 0.6 # Contribution from categorical emotion (e.g., 'sad')
+VOICE_ACOUSTIC_WEIGHT = 0.4 # Contribution from granular features (pitch, energy, etc.)
+
 # --- End Depression Analysis Configuration ---
 
 # Preload/reuse DeepFace emotion model
@@ -109,20 +148,21 @@ class EmotionEncoder(json.JSONEncoder):
         return super().default(obj)
 
 # Renamed function: calculates the raw weighted score before non-linear scaling
-def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data):
+def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data, voice_acoustic_features):
     """
-    Calculate a raw depression metric based on face and voice emotion analysis.
+    Calculate a raw depression metric based on face, voice emotion, and voice acoustic features.
     Uses detailed emotion scores when available. The score is roughly in [-1, 1].
 
     Args:
-        face_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
-        voice_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores)
+        face_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores).
+        voice_emotion_data: Dict possibly containing 'dominant_emotion' (str) and 'emotions' (dict of scores).
+        voice_acoustic_features: Dict containing extracted acoustic features for the same time segment (e.g., pitch_mean, rms_std). Values might be None if extraction failed.
 
     Returns:
         A raw score roughly between -1 and 1, representing weighted depression indication.
     """
     face_dep_contribution = 0.0
-    voice_dep_contribution = 0.0
+    voice_dep_contribution = 0.0 # Combined voice score
     face_weight_used = 0.0  # Flag to track if face data contributed
     voice_weight_used = 0.0 # Flag to track if voice data contributed
 
@@ -135,41 +175,87 @@ def calculate_raw_depression_metric(face_emotion_data, voice_emotion_data):
         if total_face_score > 1e-6: # Avoid division by zero
             for emotion, score in face_emotions.items():
                 if emotion in FACE_DEPRESSION_WEIGHTS:
-                    # Weighted contribution of this emotion, normalized by total score
                     face_dep_contribution += (score / total_face_score) * FACE_DEPRESSION_WEIGHTS[emotion]
-            face_weight_used = 1.0 # Mark that we used face data based on detailed scores
-        # Fallback if scores are zero/empty but dominant exists and is relevant
+            face_weight_used = 1.0
         elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
              face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
              face_weight_used = 1.0
-    # Fallback to dominant emotion string if no detailed scores
     elif face_dominant in FACE_DEPRESSION_WEIGHTS and FACE_DEPRESSION_WEIGHTS[face_dominant] != 0.0:
         face_dep_contribution = FACE_DEPRESSION_WEIGHTS[face_dominant]
-        face_weight_used = 1.0 # Mark that we used face data based on dominant emotion
+        face_weight_used = 1.0
 
-    # --- Calculate Voice Depression Contribution ---
+    # --- Calculate Voice Depression Contribution (Combined Emotion + Acoustics) ---
+    voice_emotion_contribution = 0.0
+    voice_acoustic_contribution = 0.0
+    emotion_data_used = False
+    acoustic_data_used = False
+
+    # 1. Contribution from Emotion Category
     voice_emotions = voice_emotion_data.get('emotions', {})
     voice_dominant = voice_emotion_data.get('dominant_emotion', 'no data')
 
-    if voice_emotions: # Prioritize detailed scores
-        total_voice_score = sum(voice_emotions.values()) # Normalize scores
+    if voice_emotions:
+        total_voice_score = sum(voice_emotions.values())
         if total_voice_score > 1e-6:
             for emotion, score in voice_emotions.items():
                 if emotion in VOICE_DEPRESSION_WEIGHTS:
-                    # Weighted contribution, normalized by total score
-                    voice_dep_contribution += (score / total_voice_score) * VOICE_DEPRESSION_WEIGHTS[emotion]
-            voice_weight_used = 1.0 # Mark that we used voice data based on detailed scores
-        # Fallback if scores are zero/empty but dominant exists and is relevant
+                    voice_emotion_contribution += (score / total_voice_score) * VOICE_DEPRESSION_WEIGHTS[emotion]
+            emotion_data_used = True
         elif voice_dominant in VOICE_DEPRESSION_WEIGHTS and VOICE_DEPRESSION_WEIGHTS[voice_dominant] != 0.0:
-            voice_dep_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
-            voice_weight_used = 1.0
-    # Fallback to dominant emotion string if no detailed scores
+            voice_emotion_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
+            emotion_data_used = True
     elif voice_dominant in VOICE_DEPRESSION_WEIGHTS and VOICE_DEPRESSION_WEIGHTS[voice_dominant] != 0.0:
-        voice_dep_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
-        voice_weight_used = 1.0 # Mark that we used voice data based on dominant emotion
+        voice_emotion_contribution = VOICE_DEPRESSION_WEIGHTS[voice_dominant]
+        emotion_data_used = True
 
-    # --- Combine scores with appropriate weighting ---
-    # Adjust overall weight dynamically if one source was missing or provided no relevant info
+    # 2. Contribution from Acoustic Features
+    if voice_acoustic_features and voice_acoustic_features.get('error') is None:
+        num_acoustic_features_used = 0
+        temp_acoustic_score = 0.0
+        for feature_name, weight in VOICE_ACOUSTIC_DEPRESSION_WEIGHTS.items():
+            feature_value = voice_acoustic_features.get(feature_name)
+            scaling_params = ACOUSTIC_FEATURE_SCALING_PARAMS.get(feature_name)
+
+            # Check if feature exists, is not None/NaN, has scaling params, and weight is non-zero
+            if (feature_value is not None and
+                not np.isnan(feature_value) and
+                scaling_params and
+                scaling_params.get('scale') is not None and
+                abs(scaling_params['scale']) > 1e-9 and # Avoid division by zero
+                abs(weight) > 1e-6):
+
+                # Apply scaling: tanh((value - center) / scale)
+                center = scaling_params.get('center', 0.0)
+                scale = scaling_params['scale']
+                scaled_value = np.tanh((feature_value - center) / scale)
+
+                # Use scaled value in weighted sum
+                temp_acoustic_score += scaled_value * weight
+                num_acoustic_features_used += 1
+
+        if num_acoustic_features_used > 0:
+            # Optional: Average the contribution if needed, though weights handle scale somewhat
+            # voice_acoustic_contribution = temp_acoustic_score / num_acoustic_features_used
+            voice_acoustic_contribution = temp_acoustic_score # Direct weighted sum for now
+            acoustic_data_used = True
+
+    # 3. Combine Voice Contributions and Set Voice Weight Flag
+    if emotion_data_used and acoustic_data_used:
+        # Combine using predefined weights
+        voice_dep_contribution = (voice_emotion_contribution * VOICE_EMOTION_WEIGHT) + \
+                                 (voice_acoustic_contribution * VOICE_ACOUSTIC_WEIGHT)
+        voice_weight_used = 1.0
+    elif emotion_data_used:
+        # Only emotion data was useful
+        voice_dep_contribution = voice_emotion_contribution
+        voice_weight_used = 1.0
+    elif acoustic_data_used:
+        # Only acoustic data was useful
+        voice_dep_contribution = voice_acoustic_contribution
+        voice_weight_used = 1.0
+    # Else: voice_dep_contribution remains 0.0, voice_weight_used remains 0.0
+
+    # --- Combine Face and Voice scores with appropriate overall weighting ---
     total_base_weight = (face_weight_used * FACE_WEIGHT) + (voice_weight_used * VOICE_WEIGHT)
 
     if total_base_weight > 1e-6:
@@ -372,7 +458,7 @@ def analyze_video_emotions(video_path, result_id):
 
             # Process voice emotion analysis using the new function
             # Pass result_id for progress updates within analyze_audio_by_second_hf
-            voice_results = analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path)
+            voice_results, acoustic_features_results = analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path)
             
             # Clean up the temporary audio file
             if os.path.exists(audio_path):
@@ -383,6 +469,7 @@ def analyze_video_emotions(video_path, result_id):
         else:
              # If audio extraction failed, create placeholder voice results
              voice_results = [{'second': s, 'dominant_emotion': 'no audio extracted', 'emotions': {}} for s in range(int(duration))]
+             acoustic_features_results = [{'second': s, 'error': 'No audio extracted'} for s in range(int(duration))]
              with open(temp_result_path, 'w') as f:
                  json.dump({
                     "status": "processing",
@@ -416,8 +503,12 @@ def analyze_video_emotions(video_path, result_id):
             voice_data = next((item for item in voice_results if item['second'] == i),
                             {'second': i, 'dominant_emotion': 'no data', 'emotions': {}})
             
-            # Calculate raw depression metric for this second
-            raw_score = calculate_raw_depression_metric(face_data, voice_data)
+            # Get corresponding acoustic features for this second
+            acoustic_data = next((item for item in acoustic_features_results if item['second'] == i),
+                               {'second': i, 'error': 'Missing acoustic data'}) # Default if not found
+
+            # Calculate raw depression metric for this second using face, voice emotion, and acoustic features
+            raw_score = calculate_raw_depression_metric(face_data, voice_data, acoustic_data)
             raw_scores_by_second.append(raw_score)
 
             # Store combined data for later use (depression score will be added after smoothing)
@@ -431,7 +522,9 @@ def analyze_video_emotions(video_path, result_id):
                     'dominant_emotion': voice_data['dominant_emotion'],
                     'emotions': voice_data['emotions']
                 },
-                # 'depression_score': depression_score # Remove placeholder
+                # Add acoustic features to the combined results for potential display/debugging
+                'voice_acoustic_features': {k: v for k, v in acoustic_data.items() if k != 'second' and k != 'error'}, # Store features, remove second/error
+                # 'depression_score': depression_score # This will be added later after smoothing
             })
         
         # --- Temporal Smoothing and Final Score Calculation ---
@@ -492,75 +585,125 @@ def analyze_video_emotions(video_path, result_id):
 
 # New function for HF model analysis, replacing the old analyze_audio_by_second
 def analyze_audio_by_second_hf(audio_path, duration, result_id, temp_result_path):
-    """Analyze audio emotion second by second using Hugging Face model with progress updates."""
+    """Analyze audio emotion second by second using Hugging Face model and acoustic features with progress updates."""
     voice_results = []
-    
+    acoustic_features_results = [] # NEW: Store acoustic features separately
+
     try:
         # Load full audio using pydub for easy slicing
         audio = AudioSegment.from_file(audio_path)
-        target_sr = voice_feature_extractor.sampling_rate
-        
+        target_sr = voice_feature_extractor.sampling_rate if voice_feature_extractor else 16000 # Default SR if extractor failed
+
         # Process audio in 1-second chunks
         for second in range(int(duration)):
             # Extract 1-second segment
             start_ms = second * 1000
             end_ms = (second + 1) * 1000
-            
+
             if end_ms > len(audio):
                 break
-                
+
             segment = audio[start_ms:end_ms]
-            
-            # Save segment to temporary file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_path = temp_file.name
-                try:
+
+            # --- Acoustic Feature Extraction ---
+            current_acoustic_features = { # Initialize features for this second
+                'rms_mean': None, 'rms_std': None,
+                'spectral_centroid_mean': None, 'spectral_centroid_std': None,
+                'zcr_mean': None, 'zcr_std': None,
+                'pitch_mean': None, 'pitch_std': None,
+                'mfcc_mean_std': None,
+                'error': None # To flag extraction issues
+            }
+            temp_path = None # Initialize temp_path
+            try:
+                # Save segment to temporary file for librosa/HF processing
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                    temp_path = temp_file.name
                     # Export segment: mono, target sample rate
                     segment.set_channels(1).set_frame_rate(target_sr).export(temp_path, format='wav')
-                except Exception as export_err:
-                    print(f"Error exporting audio segment for second {second}: {export_err}")
-                    if os.path.exists(temp_path): os.unlink(temp_path)
-                    voice_results.append({
-                        'second': second,
-                        'dominant_emotion': 'audio export error',
-                        'emotions': {}
-                    })
-                    continue
-            
-            # Predict emotion using the Hugging Face model
-            emotion_result = predict_voice_emotion_hf(temp_path)
-            
-            # Delete temporary file
-            try:
-                if os.path.exists(temp_path): os.unlink(temp_path)
-            except OSError as unlink_err:
-                 print(f"Error deleting temp audio file {temp_path}: {unlink_err}")
-            
-            # Add to results with timestamp
+
+                # Load with librosa for feature extraction
+                y, sr = librosa.load(temp_path, sr=target_sr)
+
+                # Calculate features (if audio is not silent)
+                if np.abs(y).sum() > 1e-5: # Check if segment is effectively silent
+                    # RMS
+                    rms = librosa.feature.rms(y=y)[0]
+                    current_acoustic_features['rms_mean'] = np.mean(rms)
+                    current_acoustic_features['rms_std'] = np.std(rms)
+                    # Spectral Centroid
+                    spec_cent = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+                    current_acoustic_features['spectral_centroid_mean'] = np.mean(spec_cent)
+                    current_acoustic_features['spectral_centroid_std'] = np.std(spec_cent)
+                    # Zero-Crossing Rate
+                    zcr = librosa.feature.zero_crossing_rate(y=y)[0]
+                    current_acoustic_features['zcr_mean'] = np.mean(zcr)
+                    current_acoustic_features['zcr_std'] = np.std(zcr)
+                    # Pitch (F0) using pyin
+                    f0, voiced_flag, voiced_probs = librosa.pyin(y, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'))
+                    # Use only non-NaN F0 values for stats
+                    f0_voiced = f0[~np.isnan(f0)]
+                    if len(f0_voiced) > 0:
+                        current_acoustic_features['pitch_mean'] = np.mean(f0_voiced)
+                        current_acoustic_features['pitch_std'] = np.std(f0_voiced)
+                    else:
+                         current_acoustic_features['pitch_mean'] = 0 # Or None, handle downstream
+                         current_acoustic_features['pitch_std'] = 0 # Or None
+                    # MFCCs (get std dev of the *means* of the coefficients)
+                    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+                    current_acoustic_features['mfcc_mean_std'] = np.std(np.mean(mfccs, axis=1))
+
+                # Predict emotion using the Hugging Face model (using the same temp_path)
+                emotion_result = predict_voice_emotion_hf(temp_path)
+
+            except Exception as extract_err:
+                print(f"Error extracting features/predicting for second {second}: {extract_err}")
+                current_acoustic_features['error'] = str(extract_err)
+                # Still try to get HF prediction if features failed, or vice versa?
+                # For now, if feature extraction fails, HF prediction might also fail or be skipped.
+                # Let's create a default error emotion result
+                emotion_result = {'dominant_emotion': 'analysis error', 'emotions': {}}
+                # Fallback for acoustic features already initialized to None
+
+            finally:
+                # Delete temporary file
+                try:
+                    if temp_path and os.path.exists(temp_path): os.unlink(temp_path)
+                except OSError as unlink_err:
+                     print(f"Error deleting temp audio file {temp_path}: {unlink_err}")
+
+            # Add emotion results
             voice_results.append({
                 'second': second,
                 'dominant_emotion': emotion_result['dominant_emotion'],
                 'emotions': emotion_result['emotions']
             })
-            
+            # Add acoustic features results
+            acoustic_features_results.append({
+                'second': second,
+                **current_acoustic_features # Unpack the features dict
+            })
+
             # Update progress (Voice analysis part: 50% to 90%)
             progress = 50 + int(((second + 1) / duration * 40) if duration > 0 else 0)
             with open(temp_result_path, 'w') as f:
                  json.dump({
                     "status": "processing",
                     "progress": progress,
-                    "message": f"Analyzing voice emotions... ({second+1}/{int(duration)}s)",
+                    "message": f"Analyzing voice emotions & features... ({second+1}/{int(duration)}s)",
                     "total_seconds": int(duration),
                     "results": [] # Keep results empty during processing
                 }, f, cls=EmotionEncoder)
 
-        return voice_results
-    
+        # Return both emotion predictions and acoustic features
+        return voice_results, acoustic_features_results
+
     except Exception as e:
-        print(f"Error analyzing audio by second (HF): {e}")
-        if not voice_results:
-             return [{'second': s, 'dominant_emotion': 'analysis error', 'emotions': {}} for s in range(int(duration))]
-        return voice_results
+        print(f"Error analyzing audio by second (HF + Acoustic): {e}")
+        # Provide default error data for both lists if analysis fails early
+        default_emotion = [{'second': s, 'dominant_emotion': 'analysis error', 'emotions': {}} for s in range(int(duration))]
+        default_acoustic = [{'second': s, 'error': 'Overall analysis failed'} for s in range(int(duration))]
+        return default_emotion, default_acoustic
 
 @app.route('/results/<result_id>', methods=['GET'])
 def get_results(result_id):
