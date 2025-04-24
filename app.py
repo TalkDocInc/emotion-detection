@@ -445,8 +445,8 @@ def analyze_video_emotions(video_path, result_id):
                 'depression_score': depression_score
             })
         
-        # Calculate overall depression score (average of all seconds)
-        overall_depression_score = total_depression_score / len(combined_results) if combined_results else 0
+        # Calculate overall depression score (median of all seconds)
+        overall_depression_score = np.median(depression_scores_by_second) if depression_scores_by_second else 0
         
         # Save final results
         with open(temp_result_path, 'w') as f:
