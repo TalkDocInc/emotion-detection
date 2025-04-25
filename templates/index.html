@@ -122,6 +122,28 @@
                             </div>
                         </div>
                         
+                        <!-- NEW: Transcript and Text Analysis Section -->
+                        <div class="row mb-4">
+                            <div class="col-md-12">
+                                <div class="card">
+                                    <div class="card-header">
+                                        Transcript & Text-Based Analysis
+                                    </div>
+                                    <div class="card-body">
+                                        <h6>Transcript:</h6>
+                                        <pre id="transcript-text" style="white-space: pre-wrap; max-height: 200px; overflow-y: auto; background-color: #f8f9fa; padding: 10px; border-radius: 5px;">Awaiting analysis...</pre>
+                                        <div id="transcript-error" class="text-danger small mt-1 mb-3"></div> <!-- For errors -->
+                                        <hr>
+                                        <h6>Text-Based Depression Analysis:</h6>
+                                        <p class="mb-1"><strong>Detected Level:</strong> <span id="text-analysis-label" class="fw-bold">Awaiting analysis...</span></p>
+                                        <!-- Optional: Display detailed scores -->
+                                        <div id="text-analysis-details" class="small text-muted"></div> 
+                                        <div id="text-analysis-error" class="text-danger small mt-1"></div> <!-- For errors -->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
                         <!-- Charts Container -->
                         <div id="charts-container" class="mb-4">
                             <!-- Charts will be inserted here by JavaScript -->
