@@ -13,3 +13,4 @@ pydub
 transformers
 torch
 tf-keras
+openai-whisper
