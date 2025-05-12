@@ -2,14 +2,13 @@ flask
 opencv-python
 numpy
 tensorflow
-deepface
 moviepy
 Werkzeug
 librosa
 soundfile
 scikit-learn
-joblib
 pydub
 transformers
 torch
 tf-keras
+openai-whisper

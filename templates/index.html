@@ -40,6 +40,11 @@
                                 <input class="form-control" type="file" id="video" name="video" accept="video/*" required>
                                 <div class="form-text">Upload a video file to analyze facial and voice emotions.</div>
                             </div>
+                            <div class="mb-3 form-check">
+                                <input type="checkbox" class="form-check-input" id="bypass-sigmoid" name="bypass_sigmoid">
+                                <label class="form-check-label" for="bypass-sigmoid">Bypass Sigmoid Scaling for Overall Score</label>
+                                <div class="form-text">If checked, the overall score will be a direct reflection of the combined raw scores (0-100), otherwise a sigmoid transformation is applied. Useful if a specific modality (e.g., text only) is heavily weighted.</div>
+                            </div>
                             <button type="submit" id="upload-btn" class="btn btn-primary">Upload and Analyze</button>
                         </form>
                     </div>
@@ -117,6 +122,28 @@
                                                 </div>
                                             </div>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- NEW: Transcript and Text Analysis Section -->
+                        <div class="row mb-4">
+                            <div class="col-md-12">
+                                <div class="card">
+                                    <div class="card-header">
+                                        Transcript & Text-Based Analysis
+                                    </div>
+                                    <div class="card-body">
+                                        <h6>Transcript:</h6>
+                                        <pre id="transcript-text" style="white-space: pre-wrap; max-height: 200px; overflow-y: auto; background-color: #f8f9fa; padding: 10px; border-radius: 5px;">Awaiting analysis...</pre>
+                                        <div id="transcript-error" class="text-danger small mt-1 mb-3"></div> <!-- For errors -->
+                                        <hr>
+                                        <h6>Text-Based Depression Analysis:</h6>
+                                        <p class="mb-1"><strong>Detected Level:</strong> <span id="text-analysis-label" class="fw-bold">Awaiting analysis...</span></p>
+                                        <!-- Optional: Display detailed scores -->
+                                        <div id="text-analysis-details" class="small text-muted"></div> 
+                                        <div id="text-analysis-error" class="text-danger small mt-1"></div> <!-- For errors -->
                                     </div>
                                 </div>
                             </div>
