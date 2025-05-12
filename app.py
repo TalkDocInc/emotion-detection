@@ -88,9 +88,9 @@ except Exception as e:
 
 # Numerical mapping for text depression labels
 TEXT_DEPRESSION_LABEL_TO_SCORE = {
-    'Not depression': 0.0, # Assuming lower is better
-    'Moderate': 0.5,
-    'Severe': 1.0
+    'not depression': 0.0, # Assuming lower is better
+    'moderate': 0.5,
+    'severe': 1.0
 }
 # Fallback score if text analysis fails
 DEFAULT_TEXT_DEPRESSION_SCORE = 0.0
@@ -128,14 +128,14 @@ VOICE_ACOUSTIC_DEPRESSION_WEIGHTS = {
 }
 
 # Weighting *within* the voice component
-VOICE_EMOTION_WEIGHT = 0.8 # Contribution from categorical emotion (e.g., 'sad')
-VOICE_ACOUSTIC_WEIGHT = 0.2 # Contribution from granular features (pitch, energy, etc.)
+VOICE_EMOTION_WEIGHT = 0.0 # Contribution from categorical emotion (e.g., 'sad')
+VOICE_ACOUSTIC_WEIGHT = 1.0 # Contribution from granular features (pitch, energy, etc.)
 
 # Overall weighting between face, voice (combined), and text analysis for FINAL depression score
 # Adjusted to include text analysis
-FACE_OVERALL_WEIGHT = 0.3 # Face contributes 30%
-VOICE_OVERALL_WEIGHT = 0.3 # Voice (emotion + acoustics) contributes 30%
-TEXT_OVERALL_WEIGHT = 0.4 # Text analysis contributes 40
+FACE_OVERALL_WEIGHT = 0.0 # Face contributes 30%
+VOICE_OVERALL_WEIGHT = 1.7 # Voice (emotion + acoustics) contributes 30%
+TEXT_OVERALL_WEIGHT = 0.3 # Text analysis contributes 40
 
 # --- End Depression Analysis Configuration ---
 
@@ -311,13 +311,29 @@ def analyze_text_depression(text):
         # The pipeline returns a list of lists (one for each input string)
         # Each inner list contains dicts for each label and its score
         results = text_depression_pipeline(text)[0] # Get results for the first (only) input string
+        print("Results: ", results)
 
-        # Find the label with the highest score
+        # Find the label with the highest score (still needed for "dominant_label" in output)
         best_result = max(results, key=lambda x: x['score'])
+        print("Best result: ", best_result)
         dominant_label = best_result['label']
+        print("Dominant label: ", dominant_label)
 
-        # Map the dominant label to a numerical score
-        numerical_score = TEXT_DEPRESSION_LABEL_TO_SCORE.get(dominant_label, DEFAULT_TEXT_DEPRESSION_SCORE)
+        # Calculate numerical_score as a weighted average of all label scores
+        # based on their model confidence and predefined severity.
+        numerical_score = 0.0
+        if results: # Ensure there are results to process
+            for res_item in results:
+                label_name = res_item['label']
+                model_confidence = res_item['score']
+                # Get the predefined severity for this label, default to 0.0 if not found
+                label_severity_score = TEXT_DEPRESSION_LABEL_TO_SCORE.get(label_name, 0.0)
+                numerical_score += model_confidence * label_severity_score
+                print("Numerical score: ", numerical_score)
+        else: # Fallback if results are empty for some reason
+            numerical_score = DEFAULT_TEXT_DEPRESSION_SCORE
+
+        print("Numerical score: ", numerical_score) # This will now reflect the new calculation
 
         # Return label, numerical score, and full results
         return {
@@ -408,8 +424,11 @@ def upload_file():
         file_path = os.path.join(analysis_dir, unique_filename)
         file.save(file_path)
 
+        # Get the bypass_sigmoid option
+        bypass_sigmoid = 'bypass_sigmoid' in request.form
+
         # Start analysis in a background thread
-        thread = threading.Thread(target=analyze_video_emotions, args=(file_path, result_id, analysis_dir))
+        thread = threading.Thread(target=analyze_video_emotions, args=(file_path, result_id, analysis_dir, bypass_sigmoid))
         thread.daemon = True
         thread.start()
 
@@ -422,7 +441,7 @@ def upload_file():
     else:
         return jsonify({'error': 'File type not allowed'}), 400
 
-def analyze_video_emotions(video_path, result_id, analysis_dir):
+def analyze_video_emotions(video_path, result_id, analysis_dir, bypass_sigmoid=False):
     """Analyze emotions in the video using face, voice, and text analysis"""
     face_results_per_second = []
     voice_results_per_second = []
@@ -627,6 +646,7 @@ def analyze_video_emotions(video_path, result_id, analysis_dir):
         if smoothed_raw_fv_scores: # Check if we have smoothed scores to work with
             for raw_smoothed_score in smoothed_raw_fv_scores:
                 # Apply sigmoid and scale to 0-100 for the timeline display
+                # This timeline score calculation is independent of the overall score bypass
                 sigmoid_score = 1.0 / (1.0 + np.exp(-K * raw_smoothed_score))
                 final_scaled_score = sigmoid_score * 100
                 final_scaled_scores_per_second.append(final_scaled_score)
@@ -636,10 +656,21 @@ def analyze_video_emotions(video_path, result_id, analysis_dir):
                 if idx < len(final_results["results"]):
                     final_results["results"][idx]['final_depression_score'] = score
 
-            # Calculate the OVERALL final score (0-100) by scaling the combined raw score
-            # Apply sigmoid to the weighted average of median_fv and text_score
-            final_sigmoid = 1.0 / (1.0 + np.exp(-K * final_raw_score))
-            overall_final_score = final_sigmoid * 100
+            # Calculate the OVERALL final score (0-100)
+            if bypass_sigmoid:
+                # Ensure final_raw_score is clamped to a reasonable range (e.g., 0 to 1, or -1 to 1 if that's its natural range)
+                # Assuming final_raw_score from text analysis is already 0-1, or combined fv is also scaled to a similar range
+                # If final_raw_score can be outside 0-1, this direct scaling might need adjustment
+                # For now, assuming final_raw_score is intended to be in a range that makes sense to scale by 100.
+                # If text_dep_score (0-1) is the only contributor to final_raw_score, this will be text_dep_score * 100
+                print("Text depression score: ", text_dep_score)
+                print("Final raw score: ", final_raw_score)
+                print("Overall final score: ", overall_final_score)
+                overall_final_score = np.clip(final_raw_score * 100, 0, 100)
+            else:
+                # Apply sigmoid to the weighted average of median_fv and text_score
+                final_sigmoid = 1.0 / (1.0 + np.exp(-K * final_raw_score))
+                overall_final_score = final_sigmoid * 100
 
         final_results["overall_depression_score"] = overall_final_score
         final_results["status"] = "completed"
