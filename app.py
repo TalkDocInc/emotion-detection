@@ -134,7 +134,7 @@ VOICE_ACOUSTIC_WEIGHT = 1.0 # Contribution from granular features (pitch, energy
 # Overall weighting between face, voice (combined), and text analysis for FINAL depression score
 # Adjusted to include text analysis
 FACE_OVERALL_WEIGHT = 0.0 # Face contributes 30%
-VOICE_OVERALL_WEIGHT = 1.7 # Voice (emotion + acoustics) contributes 30%
+VOICE_OVERALL_WEIGHT = 0.7 # Voice (emotion + acoustics) contributes 30%
 TEXT_OVERALL_WEIGHT = 0.3 # Text analysis contributes 40
 
 # --- End Depression Analysis Configuration ---
