@@ -24,6 +24,25 @@ document.addEventListener('DOMContentLoaded', function() {
     let emotionData = [];
     let currentActiveRow = null;
 
+    // Color palette for emotions (moved to higher scope)
+    const colors = {
+        'angry': '#dc3545',      // red
+        'disgust': '#20c997',    // teal
+        'fear': '#6610f2',       // purple
+        'happy': '#28a745',      // green
+        'sad': '#6c757d',        // gray
+        'surprise': '#fd7e14',   // orange
+        'neutral': '#007bff',    // blue
+        'no face detected': '#17a2b8',  // cyan
+        'AUs Detected': '#007bff', // blue (like neutral)
+        'No AUs': '#6c757d', // gray (like sad/neutral)
+        'error': '#ffc107', // yellow/warning for general face errors
+        'no audio detected': '#17a2b8', // cyan
+        'model error': '#ffc107',       // yellow/warning for model errors
+        'analysis error': '#ffc107',   // yellow/warning for analysis errors
+        'prediction error': '#ffc107' // yellow/warning for prediction errors
+    };
+
     // Handle form submission
     uploadForm.addEventListener('submit', function(e) {
         e.preventDefault();
@@ -248,19 +267,27 @@ document.addEventListener('DOMContentLoaded', function() {
         textAnalysisDetailsElement.textContent = '';
         textAnalysisErrorElement.textContent = '';
         if (data.text_depression_analysis) {
-            if (data.text_depression_analysis.error) {
-                textAnalysisLabelElement.textContent = 'Analysis Error';
-                textAnalysisErrorElement.textContent = `Error: ${data.text_depression_analysis.error}`;
-            } else {
-                textAnalysisLabelElement.textContent = data.text_depression_analysis.dominant_label || 'N/A';
-                // Display detailed scores (optional)
-                let detailsHtml = 'Detailed Scores: ';
-                if(data.text_depression_analysis.all_scores) {
-                    detailsHtml += Object.entries(data.text_depression_analysis.all_scores)
-                        .map(([label, score]) => `${label}: ${(score * 100).toFixed(1)}%`)
-                        .join(', ');
-                     textAnalysisDetailsElement.innerHTML = detailsHtml;
+            const analysis = data.text_depression_analysis;
+            if (analysis.error) {
+                textAnalysisLabelElement.textContent = 'Error';
+                textAnalysisDetailsElement.textContent = analysis.error;
+                textAnalysisErrorElement.textContent = ''; // Clear specific error if general one shown
+            } else if (analysis.label && analysis.score !== undefined) {
+                textAnalysisLabelElement.textContent = `Label: ${analysis.label}`;
+                let details = `Score: ${analysis.score.toFixed(3)}`;
+                if (analysis.all_scores) {
+                    details += "<br>All Scores: ";
+                    analysis.all_scores.forEach(s => {
+                        details += `${s.label}: ${s.score.toFixed(3)}, `;
+                    });
+                    details = details.slice(0, -2); // remove last comma and space
                 }
+                textAnalysisDetailsElement.innerHTML = details; // Use innerHTML for <br>
+                textAnalysisErrorElement.textContent = '';
+            } else {
+                 textAnalysisLabelElement.textContent = 'No text analysis result.';
+                 textAnalysisDetailsElement.textContent = '';
+                 textAnalysisErrorElement.textContent = '';
             }
         } else {
             textAnalysisLabelElement.textContent = 'Not performed';
@@ -276,9 +303,9 @@ document.addEventListener('DOMContentLoaded', function() {
             voiceEmotionCounts[label] = 0; 
         });
         faceEmotionCounts['no face detected'] = 0;
-        voiceEmotionCounts['no audio extracted'] = 0;
+        voiceEmotionCounts['no audio extracted'] = 0; // Corrected key
         voiceEmotionCounts['analysis error'] = 0; // Add error counts
-        faceEmotionCounts['analysis error'] = 0;
+        faceEmotionCounts['analysis error'] = 0; // Add error counts for face too
 
         // Create table header
         const headerRow = document.createElement('tr');
@@ -292,7 +319,7 @@ document.addEventListener('DOMContentLoaded', function() {
         emotionResults.appendChild(headerRow);
         
         // Generate result rows for timeline
-        emotionData.forEach(result => {
+        emotionData.forEach(result => { // emotionData is data.results
             const faceEmotion = result.face_emotion?.dominant_emotion || 'no data';
             const voiceEmotion = result.voice_emotion?.dominant_emotion || 'no data';
             // Use final_depression_score which is the smoothed+scaled FV score for the timeline
@@ -311,8 +338,8 @@ document.addEventListener('DOMContentLoaded', function() {
             // Updated details to show raw score and acoustics
             row.innerHTML = `
                 <td>${result.second}</td>
-                <td class="emotion-${faceEmotion}">${faceEmotion}</td>
-                <td class="emotion-${voiceEmotion}">${voiceEmotion}</td>
+                <td class="emotion-${faceEmotion.replace(/\\s+/g, '-').toLowerCase()}">${faceEmotion}</td>
+                <td class="emotion-${voiceEmotion.replace(/\\s+/g, '-').toLowerCase()}">${voiceEmotion}</td>
                 <td class="${depressionScoreClass}">${depressionScore}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" 
@@ -345,7 +372,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (voiceEmotion in voiceEmotionCounts) voiceEmotionCounts[voiceEmotion]++;
             else if (voiceEmotion !== 'no data') voiceEmotionCounts['analysis error']++; 
-
         });
         
         // Setup event listeners for seek buttons
@@ -393,249 +419,179 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    // Updated to handle missing data
     function getEmotionDetailsHTML(emotions) {
-        if (!emotions || typeof emotions !== 'object' || Object.keys(emotions).length === 0) {
-            return '<p class="text-muted small">No detailed emotion data available.</p>';
+        if (!emotions || Object.keys(emotions).length === 0) {
+            // Check if it's an error string like "no face detected"
+            if (typeof emotions === 'string') return `<p>${emotions}</p>`;
+            return '<p>No detailed emotion data.</p>';
         }
-        
-        let html = '<ul class="list-group list-group-flush">';
+        let html = '<ul class="list-unstyled">';
         for (const [emotion, score] of Object.entries(emotions)) {
-             // Ensure score is a number before formatting
-             const scoreNum = parseFloat(score);
-             const displayScore = !isNaN(scoreNum) ? `${(scoreNum * 100).toFixed(1)}%` : 'N/A';
-            html += `<li class="list-group-item d-flex justify-content-between align-items-center py-1 px-0">
-                        <small>${emotion}</small>
-                        <span class="badge bg-secondary rounded-pill">${displayScore}</span>
-                     </li>`;
+            html += `<li>${emotion}: ${score !== undefined ? score.toFixed(2) : 'N/A'}%</li>`;
         }
         html += '</ul>';
         return html;
     }
 
-    // NEW: Helper for Acoustic Features
     function getAcousticFeaturesHTML(features) {
-         if (!features || typeof features !== 'object' || Object.keys(features).length === 0) {
-            return '<p class="text-muted small">No acoustic feature data available.</p>';
+        if (!features || features.error) {
+            return `<p>${features?.error || 'No acoustic data.'}</p>`;
         }
-        let html = '<ul class="list-group list-group-flush">';
-         for (const [feature, value] of Object.entries(features)) {
-            const displayValue = (value !== null && !isNaN(parseFloat(value))) ? parseFloat(value).toFixed(3) : 'N/A';
-            html += `<li class="list-group-item d-flex justify-content-between align-items-center py-1 px-0">
-                        <small>${feature.replace(/_/g, ' ').replace(/\\b(\\w)/g, s => s.toUpperCase())}</small> 
-                        <span class="badge bg-light text-dark rounded-pill">${displayValue}</span>
-                     </li>`;
+        // Filter out 'error' and 'second' if they exist at top level
+        const featuresToShow = { ...features };
+        delete featuresToShow.error;
+        delete featuresToShow.second;
+
+        if (Object.keys(featuresToShow).length === 0) {
+            return '<p>No acoustic features extracted.</p>';
+        }
+
+        let html = '<ul class="list-unstyled">';
+        for (const [feature, value] of Object.entries(featuresToShow)) {
+            html += `<li>${feature.replace(/_/g, ' ')}: ${value !== null && value !== undefined ? parseFloat(value).toFixed(3) : 'N/A'}</li>`;
         }
         html += '</ul>';
         return html;
     }
-    
-    
+
     function createEmotionCharts(faceEmotionCounts, voiceEmotionCounts) {
-        // Clear previous chart container content
         const chartsContainer = document.getElementById('charts-container');
+        // Clear previous charts explicitly
         chartsContainer.innerHTML = `
-            <div class="row mb-4">
-                <div class="col-md-12">
-                    <h5 class="text-center">Depression Score Trend (Face + Voice, Smoothed)</h5>
-                    <div style="height: 200px;">
-                        <canvas id="depression-trend-chart"></canvas>
-                    </div>
+            <div class="row">
+                <div class="col-md-4">
+                    <h5>Face Emotion Distribution</h5>
+                    <canvas id="faceEmotionChart"></canvas>
+                </div>
+                <div class="col-md-4">
+                    <h5>Voice Emotion Distribution</h5>
+                    <canvas id="voiceEmotionChart"></canvas>
+                </div>
+                <div class="col-md-4">
+                    <h5>Depression Score Timeline (Smoothed F+V)</h5>
+                    <canvas id="depressionChart"></canvas>
                 </div>
             </div>
-            <div class="row mb-4">
-                <div class="col-md-6">
-                    <h5 class="text-center">Face Emotion Distribution</h5>
-                     <div style="height: 300px;">
-                        <canvas id="face-emotion-chart"></canvas>
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    <h5 class="text-center">Voice Emotion Distribution</h5>
-                    <div style="height: 300px;">
-                        <canvas id="voice-emotion-chart"></canvas>
-                    </div>
-                </div>
-            </div>
-        `; // Removed chart type toggle buttons for simplicity
-        
-        // Destroy old chart instances
+        `;
+
         if (faceChartInstance) faceChartInstance.destroy();
+        faceChartInstance = createChart(
+            document.getElementById('faceEmotionChart').getContext('2d'), 
+            'pie', 
+            Object.keys(faceEmotionCounts), 
+            Object.values(faceEmotionCounts), 
+            Object.keys(faceEmotionCounts).map(label => colors[label] || '#cccccc'), // Fallback color
+            'Face Emotion Distribution'
+        );
+
         if (voiceChartInstance) voiceChartInstance.destroy();
+        voiceChartInstance = createChart(
+            document.getElementById('voiceEmotionChart').getContext('2d'), 
+            'pie', 
+            Object.keys(voiceEmotionCounts), 
+            Object.values(voiceEmotionCounts), 
+            Object.keys(voiceEmotionCounts).map(label => colors[label] || '#cccccc'), // Fallback color
+            'Voice Emotion Distribution'
+        );
+        
+        // Depression Timeline Chart
         if (depressionChartInstance) depressionChartInstance.destroy();
+        const depressionScores = emotionData.map(r => r.final_depression_score); // Use the smoothed and scaled score
+        const depressionLabels = emotionData.map((_, i) => `Sec ${i}`);
 
-        // Color palette for emotions
-        const colors = {
-            'angry': '#dc3545', 'disgust': '#20c997', 'fear': '#6610f2', 'happy': '#28a745',
-            'sad': '#6c757d', 'surprise': '#fd7e14', 'neutral': '#007bff',
-            'no face detected': '#adb5bd', 'no audio extracted': '#adb5bd', 'analysis error': '#ffc107' // Gray/Yellow for errors
-        };
-
-        // Filter out emotions with zero counts for pie charts
-        const faceLabels = Object.keys(faceEmotionCounts).filter(emotion => faceEmotionCounts[emotion] > 0);
-        const faceData = faceLabels.map(emotion => faceEmotionCounts[emotion]);
-        const faceColors = faceLabels.map(emotion => colors[emotion] || '#17a2b8');
-        
-        const voiceLabels = Object.keys(voiceEmotionCounts).filter(emotion => voiceEmotionCounts[emotion] > 0);
-        const voiceData = voiceLabels.map(emotion => voiceEmotionCounts[emotion]);
-        const voiceColors = voiceLabels.map(emotion => colors[emotion] || '#17a2b8');
-
-        // Create face emotion chart (using Pie)
-        const faceCtx = document.getElementById('face-emotion-chart').getContext('2d');
-        if (faceLabels.length > 0) {
-            faceChartInstance = createChart(faceCtx, 'pie', faceLabels, faceData, faceColors, 'Face Emotions');
-        } else {
-             faceCtx.font = "16px Arial"; faceCtx.textAlign = "center"; faceCtx.fillText("No face data to display", faceCtx.canvas.width / 2, faceCtx.canvas.height / 2);
-        }
-
-        // Create voice emotion chart (using Pie)
-        const voiceCtx = document.getElementById('voice-emotion-chart').getContext('2d');
-         if (voiceLabels.length > 0) {
-            voiceChartInstance = createChart(voiceCtx, 'pie', voiceLabels, voiceData, voiceColors, 'Voice Emotions');
-         } else {
-             voiceCtx.font = "16px Arial"; voiceCtx.textAlign = "center"; voiceCtx.fillText("No voice data to display", voiceCtx.canvas.width / 2, voiceCtx.canvas.height / 2);
-         }
-        
-        // Create depression trend chart
-        // Use final_depression_score (smoothed F+V) for the trend line
-        const depressionCtx = document.getElementById('depression-trend-chart')?.getContext('2d');
-        if (depressionCtx && emotionData && emotionData.length > 0 && emotionData.some(item => item.final_depression_score !== undefined)) {
-            const depressionLabels = emotionData.map(item => item.second);
-            // Map to score, using null for missing values so Chart.js creates gaps
-            const depressionDataPoints = emotionData.map(item => item.final_depression_score !== undefined ? item.final_depression_score : null);
-            
-            const gradient = depressionCtx.createLinearGradient(0, 0, 0, 200);
-            gradient.addColorStop(0, 'rgba(220, 53, 69, 0.6)');    // Red (high score)
-            gradient.addColorStop(0.5, 'rgba(255, 193, 7, 0.6)');  // Yellow (mid score)
-            gradient.addColorStop(1, 'rgba(40, 167, 69, 0.6)');     // Green (low score)
-            
-            depressionChartInstance = new Chart(depressionCtx, {
-                type: 'line',
-                data: {
-                    labels: depressionLabels,
-                    datasets: [{
-                        label: 'Depression Score (F+V, Smoothed)',
-                        data: depressionDataPoints,
-                        borderColor: 'rgba(0, 123, 255, 0.8)', // Blue line
-                        backgroundColor: gradient,
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.1, // Less tension for potentially gappy data
-                        spanGaps: true // Connect line across null data points
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            max: 100,
-                            title: {
-                                display: true,
-                                text: 'Score (0-100)'
-                            }
-                        },
-                        x: {
-                            title: {
-                                display: true,
-                                text: 'Time (seconds)'
-                            },
-                            ticks: {
-                                maxTicksLimit: 15, // Adjust based on typical video length
-                                callback: function(val, index) {
-                                     // Show every 5th label or adapt based on length
-                                     const tickFrequency = Math.max(1, Math.ceil(depressionLabels.length / 15));
-                                     return index % tickFrequency === 0 ? this.getLabelForValue(val) : '';
-                                }
-                            }
-                        }
-                    },
-                    plugins: {
-                        tooltip: {
-                            mode: 'index', // Show tooltip for all points at index
-                            intersect: false,
-                            callbacks: {
-                                label: function(context) {
-                                    const score = context.parsed.y;
-                                    return score !== null ? `Score: ${Math.round(score)}/100` : 'Score: N/A';
-                                }
-                            }
-                        }
-                    },
-                    interaction: {
-                        mode: 'nearest', // Changed from index to nearest
-                        axis: 'x',
-                        intersect: false
-                    }
-                }
-            });
-        } else if (depressionCtx) {
-             // Display message if no data for trend chart
-             depressionCtx.font = "16px Arial";
-             depressionCtx.textAlign = "center";
-             depressionCtx.fillText("Depression trend data not available.", depressionCtx.canvas.width / 2, depressionCtx.canvas.height / 2);
-        }
+        depressionChartInstance = createChart(
+            document.getElementById('depressionChart').getContext('2d'),
+            'line',
+            depressionLabels,
+            [{
+                label: 'Smoothed Depression Score (F+V)',
+                data: depressionScores,
+                borderColor: '#007bff',
+                tension: 0.1,
+                fill: false
+            }],
+            null,
+            'Depression Score Timeline'
+        );
     }
 
-    // Helper function to create Pie charts (Bar chart creation removed for brevity)
-    function createChart(ctx, type, labels, data, colors, title) {
-        // Ensure type is 'pie' for this simplified example
-        if (type !== 'pie') type = 'pie'; 
+    function createChart(ctx, type, labels, data, chartColors, title) {
+        // For line charts, data might be an array of datasets. For pie, it's direct values.
+        let datasets;
+        let backgroundColors;
 
-        const options = {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    position: 'bottom',
-                    labels: { padding: 15 }
-                },
-                title: {
-                    display: false, // Title is now above the canvas
-                    text: title
-                },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            const label = context.label || '';
-                            const value = context.raw || 0;
-                            const total = context.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-                            const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
-                            return `${label}: ${value}s (${percentage}%)`; 
-                        }
-                    }
-                }
-            }
-        };
+        if (type === 'line') {
+            datasets = data; // Expects data to be [{ label: '...', data: [], ...}]
+        } else { // Pie, Bar, etc.
+            datasets = [{
+                label: title,
+                data: data,
+                backgroundColor: chartColors,
+                borderColor: chartColors.map(color => chroma(color).darken().hex()), // Example border
+                borderWidth: 1
+            }];
+            backgroundColors = chartColors; // Used by pie chart directly
+        }
 
         return new Chart(ctx, {
             type: type,
             data: {
                 labels: labels,
-                datasets: [{
-                    label: 'Seconds', // This label isn't prominent in pie charts
-                    data: data,
-                    backgroundColor: colors,
-                    borderColor: 'white',
-                    borderWidth: 1
-                }]
+                datasets: datasets
             },
-            options: options
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: (type === 'pie' || type === 'doughnut') ? 'top' : 'bottom',
+                        display: !(type === 'line' && datasets.length <=1 && !datasets[0].label) // Hide legend if line chart with one unnamed dataset
+                    },
+                    title: {
+                        display: true,
+                        text: title
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.dataset.label || '';
+                                if (label) {
+                                    label += ': ';
+                                }
+                                if (context.parsed.y !== null && type ==='line') {
+                                     label += context.parsed.y.toFixed(2);
+                                } else if (context.parsed !== null && (type === 'pie' || type === 'doughnut')) {
+                                    label += context.parsed;
+                                }
+                                return label;
+                            }
+                        }
+                    }
+                },
+                scales: (type === 'line' || type === 'bar') ? { // Only add scales for chart types that use them
+                    y: {
+                        beginAtZero: true,
+                        // SuggestedMin and Max can be added if a fixed scale is desired
+                        // suggestedMax: (type === 'line' && title.includes("Score")) ? 100 : undefined 
+                    }
+                } : {}
+            }
         });
     }
-    
+
     function showError(message) {
-        errorSection.classList.remove('d-none');
         errorMessage.textContent = message;
-        // Hide progress if showing error
-        progressSection.classList.add('d-none'); 
+        errorSection.classList.remove('d-none');
+        progressSection.classList.add('d-none'); // Hide progress on error
+        // resultsSection.classList.add('d-none'); // Optionally hide results too
     }
-    
+
     function resetUploadForm() {
         uploadBtn.disabled = false;
-        uploadBtn.innerHTML = 'Upload and Analyze';
-        // Optionally clear the file input
-        // uploadForm.reset(); 
+        uploadBtn.innerHTML = 'Upload Video';
+        uploadForm.reset(); 
+        // currentResultId = null; // Keep currentResultId if we want to re-poll or view old results
+        // currentVideoFilename = null; 
+        // Don't hide progress section immediately, might show final error message there
     }
 });
